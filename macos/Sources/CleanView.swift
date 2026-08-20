@@ -31,6 +31,7 @@ typealias CleanDryReport = (groups: [TaskGroup], summary: TaskSummary?, liveByte
 struct CleanView: View {
     @StateObject private var dryFlow = OperationFlow<CleanDryReport>()
     @StateObject private var realFlow = OperationFlow<TaskRunReport>()
+    @StateObject private var agentPlan = CleanupPlanStore()
 
     /// Which screen is on top when no run is active.
     private enum Screen { case hero, review }
@@ -47,6 +48,7 @@ struct CleanView: View {
     @State private var fdaGranted = Privacy.hasFullDiskAccess()
     /// All-time bytes cleaned (PRD §Clean), loaded off-main for the done screen.
     @State private var lifetimeCleaned: Int64 = 0
+    @AppStorage("cleanupAgentConsent.v1") private var cleanupAgentConsent = false
     @Environment(\.accessibilityReduceMotion) private var reduceMotion
 
     var body: some View {
@@ -69,8 +71,13 @@ struct CleanView: View {
                 case .running:
                     scanHero(final: false)
                 case .finished:
-                    if screen == .review, let list = reviewList {
-                        CleanReviewView(list: list, locked: reviewLocked,
+                    if screen == .review, reviewList != nil {
+                        CleanReviewView(planStore: agentPlan,
+                                        onEnableAgent: {
+                                            cleanupAgentConsent = true
+                                            agentPlan.startAgentAnalysis()
+                                        },
+                                        onRetryAgent: { agentPlan.startAgentAnalysis() },
                                         onConfirm: { confirmClean($0) },
                                         onExit: { screen = .hero })
                     } else {
@@ -274,6 +281,11 @@ struct CleanView: View {
         // and an alert that blamed the preview as a whole.
         for entry in reviewSnapshot?.skipped ?? [] {
             reviewLocked[entry.path] = .notCleanable(reason: entry.reason)
+        }
+        if let snapshot = reviewSnapshot {
+            agentPlan.load(list: list, snapshot: snapshot, locked: reviewLocked,
+                           hasAgentConsent: cleanupAgentConsent)
+            if cleanupAgentConsent { agentPlan.startAgentAnalysis() }
         }
         screen = .review
     }

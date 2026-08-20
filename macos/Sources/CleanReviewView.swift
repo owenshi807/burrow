@@ -2,306 +2,408 @@
 //  CleanReviewView.swift
 //  Burrow
 //
-//  The "Ready to clean" review (design 1.4): every path the dry-run
-//  enumerated, grouped into category cards with tri-state checkboxes,
-//  per-item Safe / App open badges, select-all/none, a live total, and
-//  the honest confirm pill. Unticked paths become a whitelist session —
-//  the engine's safety rules stay authoritative; Burrow never deletes
-//  cache paths itself (Trash mode recycles, reviewed paths only).
-//
-//  Esc returns to the result hero without losing the scan.
+//  One shared cleanup page. Scanner facts, Agent judgments, user overrides,
+//  and the final staged selection are projections of CleanupPlanStore — there
+//  is no separate "AI tab" and no second set of checkboxes to reconcile.
 //
 
 import SwiftUI
 import AppKit
 
 struct CleanReviewView: View {
-    let list: CleanList
-    let locked: [String: CleanSelection.LockReason]
+    @ObservedObject var planStore: CleanupPlanStore
     var accent: Color = Tool.clean.accent
+    var onEnableAgent: () -> Void
+    var onRetryAgent: () -> Void
     var onConfirm: (CleanSelection) -> Void
     var onExit: () -> Void
 
-    @State private var selection: CleanSelection
     @State private var expanded: Set<String> = []
+    @State private var evidenceExpanded = false
     @Environment(\.accessibilityReduceMotion) private var reduceMotion
-
-    init(list: CleanList,
-         locked: [String: CleanSelection.LockReason],
-         accent: Color = Tool.clean.accent,
-         onConfirm: @escaping (CleanSelection) -> Void,
-         onExit: @escaping () -> Void) {
-        self.list = list
-        self.locked = locked
-        self.accent = accent
-        self.onConfirm = onConfirm
-        self.onExit = onExit
-        _selection = State(initialValue: CleanSelection(list: list, locked: locked))
-    }
 
     var body: some View {
         VStack(spacing: 0) {
             header.padding(.horizontal, 22).padding(.top, 6).padding(.bottom, 12)
             Rectangle().fill(Brand.hairline).frame(height: 1)
-            ScrollView {
-                LazyVStack(spacing: 10) {
-                    // Safest / most-regenerable categories first (PRD §Clean).
-                    ForEach(CleanImpactRanker.sorted(list.categories.map { (category: $0.name, value: $0) })) { category in
-                        categoryCard(category)
+            GeometryReader { proxy in
+                HStack(spacing: 0) {
+                    planColumn
+                    if proxy.size.width >= 920 {
+                        Rectangle().fill(Brand.hairline).frame(width: 1)
+                        inspector.frame(width: min(360, max(300, proxy.size.width * 0.29)))
                     }
                 }
-                .padding(.horizontal, 22).padding(.vertical, 14)
-                .padding(.bottom, 64)   // room for the floating pill
             }
-            .scrollIndicators(.hidden)
         }
         .overlay(alignment: .bottom) { footer }
         .onExitCommand { onExit() }
+        .onChange(of: planStore.selectedCandidateId) { _, _ in evidenceExpanded = false }
     }
 
-    // MARK: - Header
+    private var planColumn: some View {
+        ScrollView {
+            LazyVStack(spacing: 12) {
+                agentDisclosure
+                ForEach(CleanupRecommendationDisposition.allCases, id: \.rawValue) { disposition in
+                    let sections = planStore.sections.filter { $0.disposition == disposition }
+                    if !sections.isEmpty {
+                        decisionHeader(disposition, sections: sections)
+                        ForEach(sections) { section in sectionCard(section) }
+                    }
+                }
+            }
+            .padding(.horizontal, 22).padding(.vertical, 14)
+            .padding(.bottom, 70)
+        }
+        .scrollIndicators(.hidden)
+    }
+
+    // MARK: - Header and Agent state
 
     private var header: some View {
         HStack(alignment: .firstTextBaseline, spacing: 14) {
-            VStack(alignment: .leading, spacing: 3) {
-                Text("Ready to clean")
-                    .font(Brand.serif(22, .medium)).foregroundStyle(Brand.textPrimary)
-                if let lockedSummary = selection.lockedSummary {
+            VStack(alignment: .leading, spacing: 4) {
+                HStack(spacing: 8) {
+                    Text("Ready to clean")
+                        .font(Brand.serif(22, .medium)).foregroundStyle(Brand.textPrimary)
+                    agentStatusChip
+                }
+                if let lockedSummary = planStore.selection?.lockedSummary {
                     Text(String(format: NSLocalizedString("Close %@ to clean another %@ · %d items", comment: "locked apps header"),
                                 lockedSummary.appNames.joined(separator: ", "),
                                 Fmt.bytes(lockedSummary.bytes), lockedSummary.itemCount))
                         .font(Brand.sans(11)).foregroundStyle(Brand.amber)
                 } else {
-                    Text("Everything below came from the scan — untick anything you'd rather keep.")
+                    Text("Agent judgments and scanner facts share one staged plan. Your edits always win.")
                         .font(Brand.sans(11)).foregroundStyle(Brand.textSecondary)
                 }
             }
             Spacer()
-            Button { onExit() } label: {
-                Image(systemName: "chevron.left").font(.system(size: 11, weight: .bold))
-                    .foregroundStyle(Brand.textSecondary)
-                    .frame(width: 24, height: 24).contentShape(Rectangle())
+            iconButton("chevron.left", help: NSLocalizedString("Back to results", comment: ""), action: onExit)
+            iconButton("checkmark.circle", help: NSLocalizedString("Select all", comment: "")) { planStore.selectAll() }
+            iconButton("xmark.circle", help: NSLocalizedString("Deselect all", comment: "")) { planStore.deselectAll() }
+        }
+    }
+
+    @ViewBuilder
+    private var agentStatusChip: some View {
+        switch planStore.agentState {
+        case .analyzing(let agent):
+            HStack(spacing: 5) {
+                ProgressView().controlSize(.mini).tint(accent)
+                Text(String(format: NSLocalizedString("%@ analyzing", comment: ""), agent))
+            }.agentChip(color: accent)
+        case .ready(let agent, _):
+            Label(String(format: NSLocalizedString("Reviewed by %@", comment: ""), agent), systemImage: "sparkles")
+                .agentChip(color: accent)
+        case .degraded(let agent, _):
+            Label(String(format: NSLocalizedString("%@ unavailable", comment: ""), agent), systemImage: "exclamationmark.triangle")
+                .agentChip(color: Brand.amber)
+        case .consentRequired:
+            Label(NSLocalizedString("Agent off", comment: ""), systemImage: "sparkles")
+                .agentChip(color: Brand.textTertiary)
+        case .unavailable, .idle:
+            EmptyView()
+        }
+    }
+
+    @ViewBuilder
+    private var agentDisclosure: some View {
+        switch planStore.agentState {
+        case .consentRequired:
+            HStack(alignment: .top, spacing: 12) {
+                Image(systemName: "sparkles").font(.system(size: 15)).foregroundStyle(accent)
+                VStack(alignment: .leading, spacing: 5) {
+                    Text("Let your Codex analyze this scan")
+                        .font(Brand.sans(13, .semibold)).foregroundStyle(Brand.textPrimary)
+                    Text("Candidate paths, sizes, and scanner categories go to your configured Codex model. Codex runs with read-only filesystem access but can inspect files your account can read. It receives no cleanup or authorization capability.")
+                        .font(Brand.sans(10)).foregroundStyle(Brand.textSecondary)
+                        .fixedSize(horizontal: false, vertical: true)
+                }
+                Spacer()
+                Button(NSLocalizedString("Analyze with Codex", comment: ""), action: onEnableAgent)
+                    .buttonStyle(.borderedProminent).tint(accent).foregroundStyle(.black)
             }
-            .buttonStyle(.plain)
-            .help(NSLocalizedString("Back to results", comment: ""))
-            .accessibilityLabel(NSLocalizedString("Back to results", comment: ""))
-            iconButton("checkmark.circle", help: NSLocalizedString("Select all", comment: "")) {
-                selection.selectAll()
+            .padding(13).background(RoundedRectangle(cornerRadius: 14).fill(accent.opacity(0.08)))
+            .overlay(RoundedRectangle(cornerRadius: 14).strokeBorder(accent.opacity(0.25)))
+        case .degraded(_, let reason):
+            HStack(spacing: 10) {
+                Image(systemName: "exclamationmark.triangle.fill").foregroundStyle(Brand.amber)
+                Text(reason).font(Brand.sans(10)).foregroundStyle(Brand.textSecondary).lineLimit(3)
+                Spacer()
+                Button(NSLocalizedString("Retry Agent", comment: ""), action: onRetryAgent)
+                    .buttonStyle(.plain).font(Brand.sans(11, .semibold)).foregroundStyle(Brand.amber)
             }
-            iconButton("xmark.circle", help: NSLocalizedString("Deselect all", comment: "")) {
-                selection.deselectAll()
+            .padding(12).background(RoundedRectangle(cornerRadius: 12).fill(Brand.amber.opacity(0.08)))
+        case .ready(_, let summary):
+            if !summary.isEmpty {
+                HStack(alignment: .top, spacing: 10) {
+                    Image(systemName: "sparkles").foregroundStyle(accent)
+                    Text(summary).font(Brand.sans(10)).foregroundStyle(Brand.textSecondary)
+                        .fixedSize(horizontal: false, vertical: true)
+                }
+                .padding(12).background(RoundedRectangle(cornerRadius: 12).fill(accent.opacity(0.06)))
             }
+        default:
+            EmptyView()
         }
     }
 
     private func iconButton(_ symbol: String, help: String, action: @escaping () -> Void) -> some View {
         Button(action: action) {
-            Image(systemName: symbol).font(.system(size: 15))
-                .foregroundStyle(Brand.textSecondary)
+            Image(systemName: symbol).font(.system(size: 15)).foregroundStyle(Brand.textSecondary)
                 .frame(width: 26, height: 26).contentShape(Rectangle())
         }
-        .buttonStyle(.plain)
-        .help(help)
-        .accessibilityLabel(help)
+        .buttonStyle(.plain).help(help).accessibilityLabel(help)
     }
 
-    // MARK: - Category card
+    // MARK: - Decision groups and category cards
 
-    private func categoryCard(_ category: CleanList.Category) -> some View {
-        let state = selection.categoryState(category.name)
-        let isOpen = expanded.contains(category.name)
+    private func decisionHeader(_ disposition: CleanupRecommendationDisposition,
+                                sections: [CleanupDecisionSection]) -> some View {
+        let candidates = sections.flatMap(\.candidates)
+        return HStack(alignment: .firstTextBaseline, spacing: 8) {
+            Text(disposition.title).font(Brand.sans(14, .semibold)).foregroundStyle(Brand.textPrimary)
+            Text("\(candidates.count)").font(Brand.mono(10, .medium)).foregroundStyle(disposition.color)
+            Spacer()
+            Text(Fmt.bytes(candidates.reduce(0) { $0 + $1.sizeBytes }))
+                .font(Brand.mono(11)).foregroundStyle(Brand.textSecondary)
+        }.padding(.top, 3)
+    }
+
+    private func sectionCard(_ section: CleanupDecisionSection) -> some View {
+        let key = section.id
+        let isOpen = expanded.contains(key)
+        let state = planStore.categoryState(for: section.candidates)
+        let selectedBytes = planStore.selectedBytes(in: section.candidates)
+        let totalBytes = section.candidates.reduce(Int64(0)) { $0 + $1.sizeBytes }
         return VStack(spacing: 0) {
             Button {
                 withAnimation(reduceMotion ? nil : .easeInOut(duration: 0.18)) {
-                    if isOpen { expanded.remove(category.name) } else { expanded.insert(category.name) }
+                    if isOpen { expanded.remove(key) } else { expanded.insert(key) }
                 }
             } label: {
                 HStack(spacing: 11) {
-                    triStateBox(state) { selection.toggleCategory(category.name) }
-                    Image(systemName: Self.glyph(for: category.name))
-                        .font(.system(size: 13)).foregroundStyle(accent)
-                        .frame(width: 20)
-                        .accessibilityHidden(true)
+                    triStateBox(state) { planStore.toggleCategory(section.category, disposition: section.disposition) }
+                    Image(systemName: Self.glyph(for: section.category))
+                        .font(.system(size: 13)).foregroundStyle(accent).frame(width: 20)
                     VStack(alignment: .leading, spacing: 2) {
                         HStack(spacing: 8) {
-                            Text(NSLocalizedString(category.name, comment: "clean category"))
+                            Text(NSLocalizedString(section.category, comment: "clean category"))
                                 .font(Brand.sans(13, .semibold)).foregroundStyle(Brand.textPrimary)
-                            Text(verbatim: "\(selection.selectedCount(in: category))/\(category.items.count) selected")
+                            Text(String(
+                                format: NSLocalizedString("%d/%d selected", comment: "category selection count"),
+                                planStore.selectedCount(in: section.candidates),
+                                section.candidates.count
+                            ))
                                 .font(Brand.mono(10)).foregroundStyle(Brand.textTertiary)
                         }
-                        Text(Self.consequence(for: category.name))
+                        Text(Self.consequence(for: section.category))
                             .font(Brand.sans(10)).foregroundStyle(Brand.textSecondary)
                     }
                     Spacer()
-                    Text(verbatim: "\(Fmt.bytes(selection.selectedBytes(in: category))) / \(Fmt.bytes(category.totalBytes))")
+                    Text("\(Fmt.bytes(selectedBytes)) / \(Fmt.bytes(totalBytes))")
                         .font(Brand.mono(11, .medium)).foregroundStyle(Brand.blue)
                     Image(systemName: "chevron.right")
                         .font(.system(size: 10, weight: .semibold)).foregroundStyle(Brand.textTertiary)
                         .rotationEffect(.degrees(isOpen ? 90 : 0))
                 }
-                .padding(13)
-                .contentShape(Rectangle())
+                .padding(13).contentShape(Rectangle())
             }
             .buttonStyle(.plain)
-            .accessibilityElement(children: .ignore)
-            .accessibilityLabel(String(format: NSLocalizedString("%@, %d of %d selected, %@ of %@", comment: "category accessibility"),
-                                       category.name,
-                                       selection.selectedCount(in: category), category.items.count,
-                                       Fmt.bytes(selection.selectedBytes(in: category)), Fmt.bytes(category.totalBytes)))
-            .accessibilityAddTraits(.isButton)
 
             if isOpen {
                 Rectangle().fill(Brand.hairline).frame(height: 1).padding(.horizontal, 13)
                 VStack(spacing: 0) {
-                    ForEach(category.items) { item in
-                        itemRow(item)
-                    }
-                }
-                .padding(.vertical, 4)
+                    ForEach(section.candidates) { candidate in candidateRow(candidate) }
+                }.padding(.vertical, 4)
             }
         }
         .background(RoundedRectangle(cornerRadius: 14, style: .continuous).fill(Brand.cardFill))
         .overlay(RoundedRectangle(cornerRadius: 14, style: .continuous).strokeBorder(Brand.hairline, lineWidth: 1))
     }
 
-    private func triStateBox(_ state: CleanSelection.CategoryState, action: @escaping () -> Void) -> some View {
+    private func triStateBox(_ state: CleanSelection.CategoryState,
+                             action: @escaping () -> Void) -> some View {
         Button(action: action) {
             ZStack {
-                RoundedRectangle(cornerRadius: 5, style: .continuous)
-                    .fill(state == .none ? Color.white.opacity(0.07) : accent.opacity(0.9))
+                RoundedRectangle(cornerRadius: 5).fill(state == .none ? Color.white.opacity(0.07) : accent.opacity(0.9))
                     .frame(width: 17, height: 17)
-                switch state {
-                case .all:
+                if state == .all {
                     Image(systemName: "checkmark").font(.system(size: 9, weight: .bold)).foregroundStyle(.black)
-                case .mixed:
+                } else if state == .mixed {
                     Image(systemName: "minus").font(.system(size: 9, weight: .bold)).foregroundStyle(.black)
-                case .none:
-                    EmptyView()
                 }
-            }
-            .overlay(RoundedRectangle(cornerRadius: 5).strokeBorder(Brand.hairline, lineWidth: 1))
-        }
-        .buttonStyle(.plain)
-        .accessibilityLabel(NSLocalizedString("Toggle category", comment: ""))
+            }.overlay(RoundedRectangle(cornerRadius: 5).strokeBorder(Brand.hairline))
+        }.buttonStyle(.plain)
     }
 
-    // MARK: - Item row
+    // MARK: - Candidate row and inspector
 
-    private func itemRow(_ item: CleanList.Item) -> some View {
-        let lockReason = locked[item.path]
-        let ticked = selection.isTicked(item.path)
+    private func candidateRow(_ candidate: CleanupPlanCandidate) -> some View {
+        let recommendation = planStore.recommendation(for: candidate.id)
+        let selected = planStore.isSelected(candidate)
+        let active = planStore.selectedCandidateId == candidate.id
         return HStack(spacing: 10) {
-            Button { selection.toggle(item.path) } label: {
+            Button { planStore.toggleCandidate(candidate.id) } label: {
                 ZStack {
-                    RoundedRectangle(cornerRadius: 5, style: .continuous)
-                        .fill(ticked ? accent.opacity(0.9) : Color.white.opacity(0.07))
+                    RoundedRectangle(cornerRadius: 5).fill(selected ? accent.opacity(0.9) : Color.white.opacity(0.07))
                         .frame(width: 15, height: 15)
-                    if ticked {
-                        Image(systemName: "checkmark").font(.system(size: 8, weight: .bold)).foregroundStyle(.black)
-                    }
-                }
-                .overlay(RoundedRectangle(cornerRadius: 5).strokeBorder(Brand.hairline, lineWidth: 1))
-            }
-            .buttonStyle(.plain)
-            .disabled(lockReason != nil)
-            .accessibilityLabel(item.displayName)
-            .accessibilityValue(ticked ? NSLocalizedString("selected", comment: "") : NSLocalizedString("not selected", comment: ""))
+                    if selected { Image(systemName: "checkmark").font(.system(size: 8, weight: .bold)).foregroundStyle(.black) }
+                }.overlay(RoundedRectangle(cornerRadius: 5).strokeBorder(Brand.hairline))
+            }.buttonStyle(.plain).disabled(candidate.locked)
 
-            VStack(alignment: .leading, spacing: 1) {
-                Text(item.displayName)
-                    .font(Brand.sans(12)).foregroundStyle(lockReason == nil ? Brand.textPrimary : Brand.textSecondary)
-                    .lineLimit(1)
-                Text(item.abbreviatedPath)
-                    .font(Brand.mono(9)).foregroundStyle(Brand.textTertiary)
+            VStack(alignment: .leading, spacing: 2) {
+                Text(candidate.displayName).font(Brand.sans(12)).foregroundStyle(Brand.textPrimary).lineLimit(1)
+                Text(candidate.abbreviatedPath).font(Brand.mono(9)).foregroundStyle(Brand.textTertiary)
                     .lineLimit(1).truncationMode(.middle)
             }
             Spacer()
-            if SensitiveRemnantMatcher.isSensitive(item.path) {
-                Text(NSLocalizedString("sensitive", comment: ""))
-                    .font(Brand.mono(9, .medium)).foregroundStyle(Brand.amber)
-                    .padding(.horizontal, 5).padding(.vertical, 1.5)
-                    .background(Capsule().fill(Brand.amber.opacity(0.16)))
-                    .help(NSLocalizedString("Looks like a credential/keychain path — review before removing.", comment: ""))
-            }
-            badge(for: lockReason)
-            if let count = item.itemCount {
-                Text(String(format: NSLocalizedString("%d items", comment: ""), count))
-                    .font(Brand.mono(9)).foregroundStyle(Brand.textTertiary)
-            }
-            Text(item.sizeText).font(Brand.mono(11)).foregroundStyle(Brand.textSecondary)
+            judgmentBadge(recommendation, candidate: candidate)
+            Text(candidate.sizeText).font(Brand.mono(11)).foregroundStyle(Brand.textSecondary)
                 .frame(minWidth: 56, alignment: .trailing)
-            Button { AnalyzeIcons.reveal(item.path) } label: {
-                Image(systemName: "magnifyingglass.circle")
-                    .font(.system(size: 12)).foregroundStyle(Brand.textTertiary)
-            }
-            .buttonStyle(.plain)
-            .help(NSLocalizedString("Reveal in Finder", comment: ""))
-            .accessibilityLabel(NSLocalizedString("Reveal in Finder", comment: ""))
+            Image(systemName: "chevron.right").font(.system(size: 9, weight: .semibold))
+                .foregroundStyle(active ? accent : Brand.textTertiary)
         }
-        .padding(.horizontal, 14).padding(.vertical, 5)
-        .opacity(lockReason == nil ? 1 : 0.65)
+        .padding(.horizontal, 14).padding(.vertical, 7)
+        .background(active ? accent.opacity(0.06) : Color.clear)
+        .contentShape(Rectangle()).onTapGesture { planStore.selectCandidate(candidate.id) }
         .contextMenu {
-            Button(NSLocalizedString("Reveal in Finder", comment: "")) { AnalyzeIcons.reveal(item.path) }
+            Button(NSLocalizedString("Reveal in Finder", comment: "")) { AnalyzeIcons.reveal(candidate.path) }
             Button(NSLocalizedString("Always skip this", comment: "")) {
-                try? MoleWhitelist.live.add(item.path)
-                if selection.isTicked(item.path) { selection.toggle(item.path) }
+                try? MoleWhitelist.live.add(candidate.path)
+                if planStore.isSelected(candidate) { planStore.toggleCandidate(candidate.id) }
             }
         }
-        .accessibilityElement(children: .combine)
     }
 
     @ViewBuilder
-    private func badge(for reason: CleanSelection.LockReason?) -> some View {
-        switch reason {
-        case .none:
-            Chip(text: NSLocalizedString("Safe", comment: "clean badge"), color: Brand.blue)
-                .help(NSLocalizedString("The scan already excluded unsafe paths — everything here is removable cache data.", comment: ""))
-        case .appOpen:
-            Chip(text: NSLocalizedString("App open", comment: "clean badge"), color: Brand.amber)
-                .help(NSLocalizedString("This app is running; its cache is locked. Quit the app and rescan to clean it.", comment: ""))
-        case .systemBusy:
-            Chip(text: NSLocalizedString("System busy", comment: "clean badge"), color: Brand.textTertiary)
-                .help(NSLocalizedString("A system service is using this path right now.", comment: ""))
-        case .notCleanable(let reason):
-            Chip(text: NSLocalizedString("Can't clean", comment: "clean badge"), color: Brand.amber)
-                .help(reason)
-                // The reason only lives in the tooltip, which VoiceOver never
-                // reaches — without this the row announces "Can't clean" and
-                // gives no way to find out why.
-                .accessibilityLabel(Text("\(NSLocalizedString("Can't clean", comment: "clean badge")). \(reason)"))
+    private func judgmentBadge(_ recommendation: CleanupCandidateRecommendation,
+                               candidate: CleanupPlanCandidate) -> some View {
+        if candidate.locked {
+            Chip(text: NSLocalizedString("Protected", comment: ""), color: Brand.amber)
+        } else if planStore.userOverrides.contains(candidate.id) {
+            Chip(text: NSLocalizedString("Your choice", comment: ""), color: Brand.amber)
+        } else if recommendation.origin == .agent {
+            Chip(text: recommendation.disposition.shortTitle, color: recommendation.disposition.color)
+        } else {
+            Chip(text: NSLocalizedString("Scanner", comment: ""), color: Brand.blue)
         }
+    }
+
+    private var inspector: some View {
+        Group {
+            if let candidate = planStore.selectedCandidate {
+                let recommendation = planStore.recommendation(for: candidate.id)
+                ScrollView {
+                    VStack(alignment: .leading, spacing: 16) {
+                        VStack(alignment: .leading, spacing: 4) {
+                            Text(candidate.displayName).font(Brand.serif(20, .medium)).foregroundStyle(Brand.textPrimary)
+                            Text(candidate.abbreviatedPath).font(Brand.mono(9)).foregroundStyle(Brand.textTertiary)
+                                .textSelection(.enabled)
+                        }
+                        VStack(alignment: .leading, spacing: 8) {
+                            HStack {
+                                Label(recommendation.disposition.title, systemImage: recommendation.disposition.symbol)
+                                    .font(Brand.sans(13, .semibold)).foregroundStyle(recommendation.disposition.color)
+                                Spacer()
+                                if let confidence = recommendation.confidence {
+                                    Text("\(Int(confidence * 100))%")
+                                        .font(Brand.mono(10)).foregroundStyle(Brand.textTertiary)
+                                }
+                            }
+                            Text(recommendation.reason).font(Brand.sans(11)).foregroundStyle(Brand.textPrimary)
+                                .fixedSize(horizontal: false, vertical: true)
+                            if planStore.userOverrides.contains(candidate.id) {
+                                Text(planStore.isSelected(candidate)
+                                     ? NSLocalizedString("You chose to include this candidate in the current plan.", comment: "")
+                                     : NSLocalizedString("You chose to keep this candidate in the current plan.", comment: ""))
+                                    .font(Brand.sans(10, .semibold)).foregroundStyle(Brand.amber)
+                            }
+                        }
+                        .padding(13)
+                        .background(RoundedRectangle(cornerRadius: 13).fill(recommendation.disposition.color.opacity(0.08)))
+
+                        VStack(alignment: .leading, spacing: 5) {
+                            Text("Consequence").font(Brand.sans(11, .semibold)).foregroundStyle(Brand.textSecondary)
+                            Text(recommendation.consequence).font(Brand.sans(11)).foregroundStyle(Brand.textPrimary)
+                                .fixedSize(horizontal: false, vertical: true)
+                            Text("\(Fmt.bytes(candidate.sizeBytes)) · \(candidate.category)")
+                                .font(Brand.mono(9)).foregroundStyle(Brand.textTertiary)
+                        }
+
+                        if !recommendation.evidence.isEmpty {
+                            DisclosureGroup(isExpanded: $evidenceExpanded) {
+                                VStack(alignment: .leading, spacing: 9) {
+                                    ForEach(recommendation.evidence) { evidence in
+                                        VStack(alignment: .leading, spacing: 2) {
+                                            Text(evidence.label).font(Brand.sans(10, .semibold)).foregroundStyle(Brand.textPrimary)
+                                            Text(evidence.detail).font(Brand.sans(10)).foregroundStyle(Brand.textSecondary)
+                                                .fixedSize(horizontal: false, vertical: true)
+                                        }
+                                    }
+                                }.padding(.top, 9)
+                            } label: {
+                                Text(String(format: NSLocalizedString("Evidence and relationships · %d", comment: ""), recommendation.evidence.count))
+                                    .font(Brand.sans(11, .semibold)).foregroundStyle(Brand.textSecondary)
+                            }.tint(accent)
+                        }
+
+                        HStack(spacing: 12) {
+                            Button(NSLocalizedString("Reveal in Finder", comment: "")) { AnalyzeIcons.reveal(candidate.path) }
+                            Button(NSLocalizedString("Ask Codex to reassess", comment: ""), action: onRetryAgent)
+                        }
+                        .buttonStyle(.plain).font(Brand.sans(10, .semibold)).foregroundStyle(accent)
+                    }
+                    .padding(18).padding(.bottom, 70)
+                }.scrollIndicators(.hidden)
+            } else {
+                Text("Select a candidate to see its judgment.")
+                    .font(Brand.sans(11)).foregroundStyle(Brand.textSecondary).padding(20)
+            }
+        }.background(Brand.nearBlack.opacity(0.35))
     }
 
     // MARK: - Footer
 
     private var footer: some View {
         HStack {
-            Text(verbatim: "\(selection.selectedCount)/\(selection.totalCount) selected")
+            Text(String(
+                format: NSLocalizedString("%d/%d selected", comment: "plan selection count"),
+                planStore.selectedCount,
+                planStore.totalCount
+            ))
                 .font(Brand.mono(11)).foregroundStyle(Brand.textSecondary)
+            if !planStore.userOverrides.isEmpty {
+                Text(String(format: NSLocalizedString("%d manual changes", comment: ""), planStore.userOverrides.count))
+                    .font(Brand.mono(9)).foregroundStyle(Brand.amber)
+            }
             Spacer()
-            Button { onConfirm(selection) } label: {
-                Text(pillLabel)
-                    .font(Brand.sans(13, .semibold)).foregroundStyle(.black)
+            Button {
+                if let selection = planStore.selection { onConfirm(selection) }
+            } label: {
+                Text(pillLabel).font(Brand.sans(13, .semibold)).foregroundStyle(.black)
                     .padding(.horizontal, 20).padding(.vertical, 10)
                     .background(Capsule().fill(Color.white))
             }
-            .buttonStyle(.plain)
-            .disabled(selection.selectedCount == 0)
-            .opacity(selection.selectedCount == 0 ? 0.5 : 1)
-            .accessibilityLabel(pillLabel)
+            .buttonStyle(.plain).disabled(planStore.selectedCount == 0)
+            .opacity(planStore.selectedCount == 0 ? 0.5 : 1)
         }
         .padding(.horizontal, 22).padding(.vertical, 12)
-        .background(
-            LinearGradient(colors: [Brand.nearBlack.opacity(0), Brand.nearBlack.opacity(0.85)],
-                           startPoint: .top, endPoint: .bottom)
-                .allowsHitTesting(false)
-        )
+        .background(LinearGradient(colors: [Brand.nearBlack.opacity(0), Brand.nearBlack.opacity(0.92)],
+                                   startPoint: .top, endPoint: .bottom).allowsHitTesting(false))
     }
 
-    /// Honest verb, live total. Permanent stays "Permanently clean";
-    /// Trash mode says what it actually does.
     private var pillLabel: String {
-        let total = Fmt.bytes(selection.selectedBytes)
+        let total = Fmt.bytes(planStore.selectedBytes)
+        if planStore.canUseAgentCTA {
+            return String(format: NSLocalizedString("Clean %@ recommendation · %@", comment: ""),
+                          planStore.agentDisplayName, total)
+        }
+        if !planStore.userOverrides.isEmpty {
+            return String(format: NSLocalizedString("Clean current plan · %@", comment: ""), total)
+        }
         return Store.cacheRemovalMode == .trash
             ? String(format: NSLocalizedString("Move to Trash · %@", comment: "confirm pill"), total)
             : String(format: NSLocalizedString("Permanently clean · %@", comment: "confirm pill"), total)
@@ -322,11 +424,10 @@ struct CleanReviewView: View {
         case "Virtualization":        return "server.rack"
         case "Application Support":   return "folder.badge.gearshape"
         case "App leftovers":         return "trash.slash"
-        default:                      return "tray.full"
+        default:                       return "tray.full"
         }
     }
 
-    /// One-line honest consequence per category — what removal costs.
     static func consequence(for category: String) -> String {
         switch category {
         case "User essentials":
@@ -353,12 +454,49 @@ struct CleanReviewView: View {
     }
 }
 
-extension CleanList.Item {
-    /// Last path component — the human name of the row.
-    var displayName: String { (path as NSString).lastPathComponent }
-
-    /// Home-relative mono path ("~/.cache/uv").
-    var abbreviatedPath: String {
-        (path as NSString).abbreviatingWithTildeInPath
+private extension View {
+    func agentChip(color: Color) -> some View {
+        self.font(Brand.mono(9, .medium)).foregroundStyle(color)
+            .padding(.horizontal, 7).padding(.vertical, 3)
+            .background(Capsule().fill(color.opacity(0.12)))
     }
+}
+
+private extension CleanupRecommendationDisposition {
+    var title: String {
+        switch self {
+        case .delete: return NSLocalizedString("Suggested cleanup", comment: "")
+        case .keep: return NSLocalizedString("Suggested keep", comment: "")
+        case .humanIntentRequired: return NSLocalizedString("Needs your intent", comment: "")
+        }
+    }
+
+    var shortTitle: String {
+        switch self {
+        case .delete: return NSLocalizedString("Agent: clean", comment: "")
+        case .keep: return NSLocalizedString("Agent: keep", comment: "")
+        case .humanIntentRequired: return NSLocalizedString("Agent: ask", comment: "")
+        }
+    }
+
+    var symbol: String {
+        switch self {
+        case .delete: return "sparkles"
+        case .keep: return "shield.checkered"
+        case .humanIntentRequired: return "person.crop.circle.badge.questionmark"
+        }
+    }
+
+    var color: Color {
+        switch self {
+        case .delete: return Tool.clean.accent
+        case .keep: return Brand.blue
+        case .humanIntentRequired: return Brand.amber
+        }
+    }
+}
+
+extension CleanList.Item {
+    var displayName: String { (path as NSString).lastPathComponent }
+    var abbreviatedPath: String { (path as NSString).abbreviatingWithTildeInPath }
 }

@@ -231,5 +231,9 @@ schemes:
       config: Debug
     test:
       config: Debug
+      environmentVariables:
+        # Empty by default, so CI skips the authenticated external-Agent smoke
+        # test. Pass BURROW_RUN_CODEX_INTEGRATION=1 to xcodebuild to exercise it.
+        BURROW_RUN_CODEX_INTEGRATION: "$(BURROW_RUN_CODEX_INTEGRATION)"
       targets:
         - BurrowTests
