@@ -588,8 +588,14 @@
 "They stay recoverable until you empty the Trash. Space frees when it empties; this run won't appear in `mo history`." = "Они остаются восстанавливаемыми, пока вы не очистите Корзину. Место освобождается при её очистке; этот запуск не появится в `mo history`.";
 "Moving caches to Trash" = "Перемещение кэшей в Корзину";
 "%d moved · %d failed" = "перемещено: %1$d · не удалось: %2$d";
+"%d moved · %d skipped · %d failed" = "перемещено: %1$d · пропущено: %2$d · не удалось: %3$d";
 "Moved %d items (%@) to the Trash." = "Перемещено в Корзину элементов: %1$d (%2$@).";
 "Moved %d items; %d were locked or already gone." = "Перемещено элементов: %1$d; заблокированы или уже отсутствуют: %2$d.";
+"Moved %d items; %d skipped; %d failed." = "Перемещено элементов: %1$d; пропущено: %2$d; не удалось: %3$d.";
+"Moved %d items; %d changed or disappeared and were skipped." = "Перемещено элементов: %1$d; изменились или исчезли и были пропущены: %2$d.";
+"Changed since scan" = "Изменились после сканирования";
+"All reviewed items changed or disappeared. Nothing was cleaned." = "Все проверенные элементы изменились или исчезли. Ничего не очищено.";
+"%d reviewed items changed or disappeared and were skipped." = "Проверенные элементы изменились или исчезли и были пропущены: %d.";
 "Moved to Trash" = "Перемещено в Корзину";
 "Freed %@" = "Освобождено %@";
 "Cleaned %@" = "Очищено %@";

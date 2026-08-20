@@ -588,8 +588,14 @@
 "They stay recoverable until you empty the Trash. Space frees when it empties; this run won't appear in `mo history`." = "清空废纸篓前都可恢复。空间在清空时才释放；这次运行不会出现在 `mo history` 中。";
 "Moving caches to Trash" = "正在将缓存移到废纸篓";
 "%d moved · %d failed" = "%1$d 项已移动 · %2$d 项失败";
+"%d moved · %d skipped · %d failed" = "%1$d 项已移动 · %2$d 项已跳过 · %3$d 项失败";
 "Moved %d items (%@) to the Trash." = "已将 %1$d 个项目（%2$@）移到废纸篓。";
 "Moved %d items; %d were locked or already gone." = "已移动 %1$d 个项目；%2$d 个被锁定或已不存在。";
+"Moved %d items; %d skipped; %d failed." = "已移动 %1$d 个项目；跳过 %2$d 个；%3$d 个失败。";
+"Moved %d items; %d changed or disappeared and were skipped." = "已移动 %1$d 个项目；另有 %2$d 个发生变化或已消失，已跳过。";
+"Changed since scan" = "扫描后发生变化";
+"All reviewed items changed or disappeared. Nothing was cleaned." = "所有已审核项目均已变化或消失，未清理任何内容。";
+"%d reviewed items changed or disappeared and were skipped." = "%d 个已审核项目发生变化或已消失，已跳过。";
 "Moved to Trash" = "已移到废纸篓";
 "Freed %@" = "已释放 %@";
 "Cleaned %@" = "已清理 %@";

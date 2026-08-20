@@ -573,8 +573,14 @@
 "They stay recoverable until you empty the Trash. Space frees when it empties; this run won't appear in `mo history`." = "清空垃圾桶前都可復原。空間在清空時才釋放；這次執行不會出現在 `mo history` 中。";
 "Moving caches to Trash" = "正在將快取移到垃圾桶";
 "%d moved · %d failed" = "%1$d 項已移動 · %2$d 項失敗";
+"%d moved · %d skipped · %d failed" = "%1$d 項已移動 · %2$d 項已略過 · %3$d 項失敗";
 "Moved %d items (%@) to the Trash." = "已將 %1$d 個項目（%2$@）移到垃圾桶。";
 "Moved %d items; %d were locked or already gone." = "已移動 %1$d 個項目；%2$d 個被鎖定或已不存在。";
+"Moved %d items; %d skipped; %d failed." = "已移動 %1$d 個項目；略過 %2$d 個；%3$d 個失敗。";
+"Moved %d items; %d changed or disappeared and were skipped." = "已移動 %1$d 個項目；另有 %2$d 個發生變化或已消失，已略過。";
+"Changed since scan" = "掃描後發生變化";
+"All reviewed items changed or disappeared. Nothing was cleaned." = "所有已審核項目均已變更或消失，未清理任何內容。";
+"%d reviewed items changed or disappeared and were skipped." = "%d 個已審核項目發生變更或已消失，已略過。";
 "Moved to Trash" = "已移到垃圾桶";
 "Freed %@" = "已釋放 %@";
 "Cleaned %@" = "已清理 %@";

@@ -312,9 +312,9 @@ struct CleanView: View {
         let refused = Set(snapshot.skipped.map(\.path))
         let paths = selection.list.categories.flatMap(\.items).map(\.path)
             .filter { selection.isTicked($0) && !refused.contains($0) }
-        let plan: CleanupExecutionPlan
+        let preparation: CleanupSnapshot.PlanPreparation
         do {
-            plan = try snapshot.plan(selectedPaths: paths)
+            preparation = try snapshot.preparePlan(selectedPaths: paths)
         } catch {
             let alert = NSAlert()
             alert.messageText = NSLocalizedString("The reviewed files changed", comment: "")
@@ -323,6 +323,8 @@ struct CleanView: View {
             alert.runModalQuiet()
             return
         }
+        let plan = preparation.plan
+        let executablePaths = Set(plan.items.map(\.identity.path))
         screen = .hero
         // `find -delete` succeeds SILENTLY — it writes nothing at all — so
         // parsing its output produced an empty report: no items, no bytes, no
@@ -333,9 +335,10 @@ struct CleanView: View {
         // is precisely what makes this safe to state as fact.
         let cleaned = selection.list.categories
             .map { category in
-                (category.name, category.items.filter { paths.contains($0.path) })
+                (category.name, category.items.filter { executablePaths.contains($0.path) })
             }
             .filter { !$0.1.isEmpty }
+        let changed = preparation.skippedChangedPaths
         let cleanedBytes = cleaned.flatMap(\.1).reduce(Int64(0)) { $0 + $1.sizeBytes }
         let cleanedCount = cleaned.reduce(0) { $0 + $1.1.count }
         realFlow.start(ToolOperation(
@@ -343,13 +346,19 @@ struct CleanView: View {
             executable: .path("/usr/bin/find"), arguments: [], elevated: true,
             cleanupPlan: plan,
             reduce: { _ in
-                (groups: cleaned.map { name, items in
+                var groups = cleaned.map { name, items in
                     TaskGroup(title: name,
                               items: items.map { TaskItem(marker: .ok, text: $0.path) })
-                 },
-                 summary: TaskSummary(space: Fmt.bytes(cleanedBytes),
-                                      items: "\(cleanedCount)",
-                                      categories: "\(cleaned.count)"))
+                }
+                if !changed.isEmpty {
+                    groups.append(TaskGroup(
+                        title: NSLocalizedString("Changed since scan", comment: "cleanup result group"),
+                        items: changed.map { TaskItem(marker: .info, text: $0) }))
+                }
+                return (groups: groups,
+                        summary: TaskSummary(space: Fmt.bytes(cleanedBytes),
+                                             items: "\(cleanedCount)",
+                                             categories: "\(cleaned.count)"))
             },
             notifyOnEnd: true))
     }
@@ -367,17 +376,9 @@ struct CleanView: View {
             .filter { selection.isTicked($0) && !refused.contains($0) }
         // Refuse anything that didn't come from the dry-run enumeration.
         assert(Set(paths).isSubset(of: Set(selection.list.categories.flatMap(\.items).map(\.path))))
-        let total = selection.selectedBytes
-        let alert = NSAlert()
-        alert.messageText = String(format: NSLocalizedString("Move %d items (%@) to the Trash?", comment: ""), paths.count, Fmt.bytes(total))
-        alert.informativeText = NSLocalizedString("They stay recoverable until you empty the Trash. Space frees when it empties; this run won't appear in `mo history`.", comment: "")
-        alert.addButton(withTitle: NSLocalizedString("Move to Trash", comment: ""))
-        alert.addButton(withTitle: NSLocalizedString("Cancel", comment: ""))
-        guard alert.runModalQuiet() == .alertFirstButtonReturn else { return }
-
-        let plan: CleanupExecutionPlan
+        let preparation: CleanupSnapshot.PlanPreparation
         do {
-            plan = try snapshot.plan(selectedPaths: paths)
+            preparation = try snapshot.preparePlan(selectedPaths: paths)
         } catch {
             let changed = NSAlert()
             changed.messageText = NSLocalizedString("The reviewed files changed", comment: "")
@@ -386,6 +387,17 @@ struct CleanView: View {
             changed.runModalQuiet()
             return
         }
+        let plan = preparation.plan
+        let executablePaths = Set(plan.items.map(\.identity.path))
+        let actualItems = selection.list.categories.flatMap(\.items)
+            .filter { executablePaths.contains($0.path) }
+        let total = actualItems.reduce(Int64(0)) { $0 + $1.sizeBytes }
+        let alert = NSAlert()
+        alert.messageText = String(format: NSLocalizedString("Move %d items (%@) to the Trash?", comment: ""), actualItems.count, Fmt.bytes(total))
+        alert.informativeText = NSLocalizedString("They stay recoverable until you empty the Trash. Space frees when it empties; this run won't appear in `mo history`.", comment: "")
+        alert.addButton(withTitle: NSLocalizedString("Move to Trash", comment: ""))
+        alert.addButton(withTitle: NSLocalizedString("Cancel", comment: ""))
+        guard alert.runModalQuiet() == .alertFirstButtonReturn else { return }
 
         screen = .hero
         let opID = UUID()
@@ -393,13 +405,19 @@ struct CleanView: View {
                                      notifiesOnEnd: true)
         DispatchQueue.global(qos: .userInitiated).async {
             let result = CleanupExecutor.moveToTrash(plan)
-            let moved = result.moved, failed = result.failed
+            let moved = result.moved
+            let skipped = preparation.skippedChangedPaths.count + result.skipped
+            let failed = result.failed
             DispatchQueue.main.async {
                 OperationCenter.shared.end(opID, success: failed == 0,
-                                           detail: String(format: NSLocalizedString("%d moved · %d failed", comment: ""), moved, failed))
-                trashResult = failed == 0
-                    ? String(format: NSLocalizedString("Moved %d items (%@) to the Trash.", comment: ""), moved, Fmt.bytes(total))
-                    : String(format: NSLocalizedString("Moved %d items; %d were locked or already gone.", comment: ""), moved, failed)
+                                           detail: String(format: NSLocalizedString("%d moved · %d skipped · %d failed", comment: ""), moved, skipped, failed))
+                if failed > 0 {
+                    trashResult = String(format: NSLocalizedString("Moved %d items; %d skipped; %d failed.", comment: ""), moved, skipped, failed)
+                } else if skipped > 0 {
+                    trashResult = String(format: NSLocalizedString("Moved %d items; %d changed or disappeared and were skipped.", comment: ""), moved, skipped)
+                } else {
+                    trashResult = String(format: NSLocalizedString("Moved %d items (%@) to the Trash.", comment: ""), moved, Fmt.bytes(total))
+                }
                 dryFlow.reset()
             }
         }

@@ -276,10 +276,10 @@ final class CleanupAuthorizationTests: XCTestCase {
         XCTAssertEqual(plan.orderedReviewedPaths(), [deeper.path, nested.path, caches.path],
                        "a parent must never be deleted before its own listed children")
         // The shell the osascript route runs is built from the same order.
-        // Only the delete loop matters — the boundary checks ahead of it stat
-        // every root and item, so searching the whole script finds those first.
+        // Only the item steps matter — the boundary checks ahead of them stat
+        // every root, so searching the whole script finds those first.
         let shell = plan.irreversibleCleanupShell()
-        let loop = String(shell[try XCTUnwrap(shell.range(of: "for p in")).lowerBound...])
+        let loop = String(shell[try XCTUnwrap(shell.range(of: "failed=0")).lowerBound...])
         let deepIndex = try XCTUnwrap(loop.range(of: deeper.path)).lowerBound
         let parentIndex = try XCTUnwrap(loop.range(of: caches.path + "'")).lowerBound
         XCTAssertLessThan(deepIndex, parentIndex)
@@ -311,6 +311,34 @@ final class CleanupAuthorizationTests: XCTestCase {
                       "malformed/swapped directories are refused, never auto-deleted")
     }
 
+    func testOneChangedSelectedItemIsSkippedWithoutInvalidatingStableItems() throws {
+        let stable = root.appendingPathComponent("stable-cache")
+        let volatile = root.appendingPathComponent("volatile-cache")
+        try FileManager.default.createDirectory(at: stable, withIntermediateDirectories: false)
+        try FileManager.default.createDirectory(at: volatile, withIntermediateDirectories: false)
+        let snapshot = try CleanupSnapshot.capture(
+            list: list([stable.path, volatile.path]), approvedRootURLs: [root])
+
+        try FileManager.default.removeItem(at: volatile)
+        let prepared = try snapshot.preparePlan(selectedPaths: [stable.path, volatile.path])
+
+        XCTAssertEqual(prepared.plan.items.map(\.identity.path), [stable.path])
+        XCTAssertEqual(prepared.skippedChangedPaths, [volatile.path])
+        XCTAssertTrue(prepared.plan.validateForLaunch())
+    }
+
+    func testAllChangedSelectedItemsStillFailClosed() throws {
+        let volatile = root.appendingPathComponent("only-volatile-cache")
+        try FileManager.default.createDirectory(at: volatile, withIntermediateDirectories: false)
+        let snapshot = try CleanupSnapshot.capture(
+            list: list([volatile.path]), approvedRootURLs: [root])
+
+        try FileManager.default.removeItem(at: volatile)
+        XCTAssertThrowsError(try snapshot.preparePlan(selectedPaths: [volatile.path])) {
+            XCTAssertEqual($0 as? CleanupSnapshot.SnapshotError, .staleOrChanged)
+        }
+    }
+
     func testTrashMoveRestoresAnUnreviewedObjectCapturedByAPathRace() throws {
         let reviewed = root.appendingPathComponent("reviewed")
         let original = root.appendingPathComponent("original-reviewed")
@@ -331,7 +359,7 @@ final class CleanupAuthorizationTests: XCTestCase {
             return fakeTrash
         }
 
-        XCTAssertEqual(result, .init(moved: 0, failed: 1))
+        XCTAssertEqual(result, .init(moved: 0, skipped: 1, failed: 0))
         XCTAssertEqual(try String(contentsOf: reviewed.appendingPathComponent("marker")),
                        "unreviewed", "the raced object must be restored, not deleted")
         XCTAssertEqual(try String(contentsOf: original.appendingPathComponent("marker")),
@@ -378,6 +406,21 @@ final class CleanupAuthorizationTests: XCTestCase {
                        "unreviewed", "the substituted inode must not be deleted")
         XCTAssertEqual(try String(contentsOf: moved.appendingPathComponent("marker")),
                        "reviewed", "the reviewed inode survives at its new name")
+    }
+
+    func testIrreversibleCleanupSkipsChangedItemAndDeletesStableItem() throws {
+        let stable = root.appendingPathComponent("stable")
+        let volatile = root.appendingPathComponent("volatile")
+        try FileManager.default.createDirectory(at: stable, withIntermediateDirectories: false)
+        try FileManager.default.createDirectory(at: volatile, withIntermediateDirectories: false)
+        let snapshot = try CleanupSnapshot.capture(
+            list: list([stable.path, volatile.path]), approvedRootURLs: [root])
+        let plan = try snapshot.plan(selectedPaths: [stable.path, volatile.path])
+
+        try FileManager.default.removeItem(at: volatile)
+        XCTAssertEqual(try runCleanupShell(plan.irreversibleCleanupShell()), 0)
+        XCTAssertFalse(FileManager.default.fileExists(atPath: stable.path))
+        XCTAssertFalse(FileManager.default.fileExists(atPath: volatile.path))
     }
 
     /// The deliberate trade behind deleting the tree rooted at the reviewed

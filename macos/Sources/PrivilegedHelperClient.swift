@@ -242,6 +242,7 @@ final class PrivilegedHelperClient: @unchecked Sendable {
     func run(operation: HelperOperation,
              interface: String? = nil,
              reviewedPaths: [String] = [],
+             cleanupPlan: CleanupExecutionPlan? = nil,
              invokingUser suppliedIdentity: InvokingUserIdentity? = nil,
              onLine: @escaping (String) -> Void) -> ElevatedOutcome {
         // Resolve while still running as the caller and before showing an auth
@@ -277,9 +278,25 @@ final class PrivilegedHelperClient: @unchecked Sendable {
         // from the user being refused. `withExtendedLifetime` is what
         // guarantees the optimizer can't drop it early; ordinary scoping is
         // not a guarantee.
+        var effectiveReviewedPaths = reviewedPaths
+        if operation.needsReviewedPaths, let cleanupPlan {
+            guard let revalidated = cleanupPlan.revalidatedForLaunch() else {
+                onLine(NSLocalizedString(
+                    "All reviewed items changed or disappeared. Nothing was cleaned.",
+                    comment: ""))
+                return .exited(ElevatedExitCode.boundaryCheckFailed)
+            }
+            effectiveReviewedPaths = revalidated.plan.orderedReviewedPaths()
+            if !revalidated.skippedPaths.isEmpty {
+                onLine(String(format: NSLocalizedString(
+                    "%d reviewed items changed or disappeared and were skipped.",
+                    comment: ""), revalidated.skippedPaths.count))
+            }
+        }
+
         return withExtendedLifetime(granted) {
             send(payload: granted.externalForm, operation: operation,
-                 interface: interface, reviewedPaths: reviewedPaths,
+                 interface: interface, reviewedPaths: effectiveReviewedPaths,
                  invokingUser: invokingUser, onLine: onLine)
         }
     }
@@ -392,7 +409,8 @@ struct HelperAwareProcessPort: ProcessPort {
                     // already went stale should never raise a prompt at all.
                     let reviewedPaths: [String]
                     if operation.needsReviewedPaths {
-                        guard let plan = spec.cleanupPlan, plan.validateForLaunch() else {
+                        guard let plan = spec.cleanupPlan,
+                              let revalidated = plan.revalidatedForLaunch() else {
                             continuation.yield(.line(NSLocalizedString(
                                 "The reviewed items changed before the run started, so nothing was cleaned.",
                                 comment: "")))
@@ -400,12 +418,13 @@ struct HelperAwareProcessPort: ProcessPort {
                             continuation.finish()
                             return
                         }
-                        reviewedPaths = plan.orderedReviewedPaths()
+                        reviewedPaths = revalidated.plan.orderedReviewedPaths()
                     } else {
                         reviewedPaths = []
                     }
                     let outcome = client.run(operation: operation,
                                              reviewedPaths: reviewedPaths,
+                                             cleanupPlan: spec.cleanupPlan,
                                              invokingUser: spec.invokingUser) { line in
                         sawOutput = true
                         continuation.yield(.line(line))
@@ -437,7 +456,19 @@ struct HelperAwareProcessPort: ProcessPort {
                     // Forward the legacy stream verbatim, including its
                     // cancellation behaviour.
                     let task = Task {
-                        for await event in fallback.events(spec) { continuation.yield(event) }
+                        var effectiveSpec = spec
+                        if let plan = spec.cleanupPlan {
+                            guard let revalidated = plan.revalidatedForLaunch() else {
+                                continuation.yield(.line(NSLocalizedString(
+                                    "The reviewed items changed before the run started, so nothing was cleaned.",
+                                    comment: "")))
+                                continuation.yield(.exited(ElevatedExitCode.boundaryCheckFailed))
+                                continuation.finish()
+                                return
+                            }
+                            effectiveSpec.cleanupPlan = revalidated.plan
+                        }
+                        for await event in fallback.events(effectiveSpec) { continuation.yield(event) }
                         continuation.finish()
                     }
                     continuation.onTermination = { @Sendable _ in task.cancel() }

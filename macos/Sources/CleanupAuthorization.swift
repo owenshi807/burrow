@@ -40,11 +40,17 @@ struct CleanupExecutionPlan: Sendable, Equatable {
     }
 
     func validateForLaunch(now: Date = Date()) -> Bool {
+        validateEnvelopeForLaunch(now: now) && items.allSatisfy { $0.identity.matchesCurrent() }
+    }
+
+    /// Validate plan-level authority without turning one volatile item into a
+    /// batch-level failure. Expiry, seal, roots, and containment are global;
+    /// item identity is deliberately checked by the caller per item.
+    func validateEnvelopeForLaunch(now: Date = Date()) -> Bool {
         guard now <= expiresAt, !items.isEmpty,
               seal == Self.makeSeal(snapshotID: snapshotID, createdAt: createdAt,
                                     expiresAt: expiresAt, roots: approvedRoots, items: items),
-              approvedRoots.allSatisfy({ $0.matchesCurrent() }),
-              items.allSatisfy({ $0.identity.matchesCurrent() }) else { return false }
+              approvedRoots.allSatisfy({ $0.matchesCurrent() }) else { return false }
         let rootPrefixes: [(device: UInt64, path: String, prefix: String)] = approvedRoots.map {
             ($0.device, $0.path, $0.path.hasSuffix("/") ? $0.path : $0.path + "/")
         }
@@ -57,13 +63,35 @@ struct CleanupExecutionPlan: Sendable, Equatable {
         }
     }
 
+    struct Revalidation: Sendable, Equatable {
+        let plan: CleanupExecutionPlan
+        let skippedPaths: [String]
+    }
+
+    /// Drop only entries whose pinned identity changed. A fresh sealed plan is
+    /// produced for the stable subset; global trust failures still fail closed.
+    func revalidatedForLaunch(now: Date = Date()) -> Revalidation? {
+        guard validateEnvelopeForLaunch(now: now) else { return nil }
+        var stable: [Item] = []
+        var skipped: [String] = []
+        for item in items {
+            if item.identity.matchesCurrent() { stable.append(item) }
+            else { skipped.append(item.identity.path) }
+        }
+        guard !stable.isEmpty else { return nil }
+        let plan = CleanupExecutionPlan(snapshotID: snapshotID, createdAt: createdAt,
+                                        expiresAt: expiresAt, approvedRoots: approvedRoots,
+                                        items: stable)
+        guard plan.validateForLaunch(now: now) else { return nil }
+        return Revalidation(plan: plan, skippedPaths: skipped)
+    }
+
     /// Checks serialized into the administrator shell. They are intentionally
     /// repeated after the password dialog because that dialog is an unbounded
     /// attacker-controlled delay.
     func executionBoundaryChecks() -> [String] {
         let expiry = Int(expiresAt.timeIntervalSince1970)
-        let identities = approvedRoots + items.map(\.identity)
-        return ["[ \"$(/bin/date +%s)\" -le \(expiry) ]"] + identities.map { identity in
+        return ["[ \"$(/bin/date +%s)\" -le \(expiry) ]"] + approvedRoots.map { identity in
             let path = MoleCLI.shellQuote(identity.path)
             let token = MoleCLI.shellQuote(identity.shellStatToken)
             return "[ \"$(/usr/bin/stat -f '%d:%i:%u:%p' -- \(path) 2>/dev/null)\" = \(token) ]"
@@ -125,11 +153,26 @@ struct CleanupExecutionPlan: Sendable, Equatable {
         let checks = executionBoundaryChecks().map {
             $0 + " || exit \(ElevatedExitCode.boundaryCheckFailed)"
         }
-        let paths = quotedReviewedPaths().joined(separator: " ")
-        let loop = "failed=0; for p in \(paths); do "
-            + "/usr/bin/find -x \"$p\" -depth -delete; "
-            + "if [ -e \"$p\" ] || [ -L \"$p\" ]; then failed=1; fi; "
-            + "done; [ \"$failed\" -eq 0 ]"
+        let ordered = items.sorted {
+            let lhs = $0.identity.path.filter { $0 == "/" }.count
+            let rhs = $1.identity.path.filter { $0 == "/" }.count
+            return lhs == rhs ? $0.identity.path < $1.identity.path : lhs > rhs
+        }
+        let itemSteps = ordered.map { item -> String in
+            let identity = item.identity
+            let path = MoleCLI.shellQuote(identity.path)
+            let token = MoleCLI.shellQuote(identity.shellStatToken)
+            let current = "$(/usr/bin/stat -f '%d:%i:%u:%p' -- \(path) 2>/dev/null)"
+            return "if [ \"\(current)\" = \(token) ]; then "
+                + "attempted=$((attempted + 1)); p=\(path); "
+                + "/usr/bin/find -x \"$p\" -depth -delete; "
+                + "if [ -e \"$p\" ] || [ -L \"$p\" ]; then failed=1; fi; "
+                + "else skipped=$((skipped + 1)); fi"
+        }
+        let loop = (["failed=0", "attempted=0", "skipped=0"] + itemSteps + [
+            "[ \"$attempted\" -gt 0 ] || exit \(ElevatedExitCode.boundaryCheckFailed)",
+            "[ \"$failed\" -eq 0 ]",
+        ]).joined(separator: "; ")
         return (checks + [loop]).joined(separator: "; ")
     }
 
@@ -149,6 +192,11 @@ struct CleanupExecutionPlan: Sendable, Equatable {
 }
 
 struct CleanupSnapshot: Sendable, Equatable {
+    struct PlanPreparation: Sendable, Equatable {
+        let plan: CleanupExecutionPlan
+        let skippedChangedPaths: [String]
+    }
+
     enum SnapshotError: LocalizedError, Equatable {
         case noApprovedRoots
         case malformedPath(String)
@@ -276,7 +324,7 @@ struct CleanupSnapshot: Sendable, Equatable {
         return root
     }
 
-    func plan(selectedPaths: [String], now: Date = Date()) throws -> CleanupExecutionPlan {
+    private func unvalidatedPlan(selectedPaths: [String], now: Date) throws -> CleanupExecutionPlan {
         guard now <= expiresAt else { throw SnapshotError.staleOrChanged }
         let selected = Set(selectedPaths)
         let byPath = Dictionary(uniqueKeysWithValues: items.map { ($0.identity.path, $0) })
@@ -285,9 +333,22 @@ struct CleanupSnapshot: Sendable, Equatable {
             throw SnapshotError.selectionMismatch
         }
         let ordered = items.filter { selected.contains($0.identity.path) }
-        let result = CleanupExecutionPlan(snapshotID: id, createdAt: createdAt,
-                                          expiresAt: expiresAt,
-                                          approvedRoots: approvedRoots, items: ordered)
+        return CleanupExecutionPlan(snapshotID: id, createdAt: createdAt,
+                                    expiresAt: expiresAt,
+                                    approvedRoots: approvedRoots, items: ordered)
+    }
+
+    func preparePlan(selectedPaths: [String], now: Date = Date()) throws -> PlanPreparation {
+        let result = try unvalidatedPlan(selectedPaths: selectedPaths, now: now)
+        guard let revalidated = result.revalidatedForLaunch(now: now) else {
+            throw SnapshotError.staleOrChanged
+        }
+        return PlanPreparation(plan: revalidated.plan,
+                               skippedChangedPaths: revalidated.skippedPaths)
+    }
+
+    func plan(selectedPaths: [String], now: Date = Date()) throws -> CleanupExecutionPlan {
+        let result = try unvalidatedPlan(selectedPaths: selectedPaths, now: now)
         guard result.validateForLaunch(now: now) else { throw SnapshotError.staleOrChanged }
         return result
     }
@@ -301,18 +362,24 @@ struct CleanupSnapshot: Sendable, Equatable {
 }
 
 enum CleanupExecutor {
-    struct Result: Sendable, Equatable { let moved: Int; let failed: Int }
+    struct Result: Sendable, Equatable {
+        let moved: Int
+        let skipped: Int
+        let failed: Int
+    }
 
     static func moveToTrash(_ plan: CleanupExecutionPlan,
                             move: (URL) throws -> URL = systemTrashMove) -> Result {
-        guard plan.validateForLaunch() else { return Result(moved: 0, failed: plan.items.count) }
-        var moved = 0, failed = 0
+        guard plan.validateEnvelopeForLaunch() else {
+            return Result(moved: 0, skipped: 0, failed: plan.items.count)
+        }
+        var moved = 0, skipped = 0, failed = 0
         for item in plan.items {
-            guard item.identity.matchesCurrent() else { failed += 1; continue }
+            guard item.identity.matchesCurrent() else { skipped += 1; continue }
             let flags = O_RDONLY | O_NOFOLLOW | O_CLOEXEC |
                 (item.identity.isDirectory ? O_DIRECTORY : 0)
             let descriptor = Darwin.open(item.identity.path, flags)
-            guard descriptor >= 0 else { failed += 1; continue }
+            guard descriptor >= 0 else { skipped += 1; continue }
             defer { Darwin.close(descriptor) }
             var opened = stat()
             guard fstat(descriptor, &opened) == 0,
@@ -320,7 +387,7 @@ enum CleanupExecutor {
                   UInt64(opened.st_ino) == item.identity.inode,
                   UInt32(opened.st_uid) == item.identity.owner,
                   UInt16(opened.st_mode) == item.identity.mode else {
-                failed += 1
+                skipped += 1
                 continue
             }
             do {
@@ -338,7 +405,7 @@ enum CleanupExecutor {
                     // vnode. Put that recoverable object back when possible;
                     // if its name was occupied again, leave it in Trash.
                     restoreUnreviewedItem(at: destination, to: source)
-                    failed += 1
+                    skipped += 1
                     continue
                 }
                 moved += 1
@@ -346,7 +413,7 @@ enum CleanupExecutor {
                 failed += 1
             }
         }
-        return Result(moved: moved, failed: failed)
+        return Result(moved: moved, skipped: skipped, failed: failed)
     }
 
     private static func systemTrashMove(_ source: URL) throws -> URL {
