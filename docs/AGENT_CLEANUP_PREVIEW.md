@@ -1,6 +1,6 @@
 # Burrow Agent Cleanup Preview
 
-Build date: 2026-08-20  
+Build date: 2026-08-21
 Branch: `feat/agent-cleanup-plan`
 
 ## Product memory
@@ -48,3 +48,13 @@ The upstream engine submodule is not publicly accessible. This personal preview
 bundles the universal `burrow` engine and `fclones` sidecar from the installed
 Burrow 0.14.0 (build 26), which exactly matches this fork's upstream baseline;
 the complete app is then re-signed and notarized as one distribution.
+
+## Original app icon
+
+The Moon Cheese/Burrow app icon is original generated artwork based on the
+public “Modern Isometric 3D Icons — High-Fidelity” textual style prompt. The
+Thiings Moon Cheese artwork was neither used as a generation reference nor
+included in this repository or build.
+
+Style prompt source:
+https://gist.github.com/tanishqsh/ad7ef969cef9d7f3a5a688de49354084
