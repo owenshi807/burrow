@@ -112,8 +112,10 @@ final class AppDelegate: NSObject, NSApplicationDelegate, NSWindowDelegate {
         markLaunch(.telemetryStarted)
         recordPriorLaunchDiagnostics()
 
-        // No engine yet → guided install instead of a dead-end quit. The
-        // window's Recheck calls startServices() once `mo` is found.
+        // Engine discovery is diagnostic, not a launch gate. Status sampling has a native
+        // macOS source, and engine-backed tools already expose their own unavailable state.
+        // Keeping the whole app behind a CLI probe made a missing or stale sidecar look like
+        // an infinitely loading dashboard.
         //
         // Discovery can shell out to `which mo` (MoleCLI.discover) when mo
         // isn't in a trusted Homebrew path — a blocking Process wait that must
@@ -130,12 +132,8 @@ final class AppDelegate: NSObject, NSApplicationDelegate, NSWindowDelegate {
             DispatchQueue.main.async {
                 guard let self else { return }
                 self.markLaunch(.engineProbeFinished)
-                if found {
-                    self.startServices()
-                } else {
-                    Telemetry.capture("engine_missing")
-                    self.showInstallWindow()
-                }
+                if !found { Telemetry.capture("engine_missing") }
+                self.startServices()
             }
         }
     }
@@ -167,9 +165,8 @@ final class AppDelegate: NSObject, NSApplicationDelegate, NSWindowDelegate {
         Telemetry.capture("install_window_ready")
     }
 
-    /// The `mo`-dependent startup: open the DB, start the server/sampler/
-    /// maintenance, and install the status item. Called either directly at
-    /// launch or after the guided install finds `mo`.
+    /// Open the DB, start the server/sampler/maintenance, and install the status item.
+    /// Engine-backed tools degrade independently; the dashboard itself always starts.
     private func startServices() {
         markLaunch(.databaseOpening)
         let databaseSpan = CrashReporter.startLaunchSpan("database_open")
@@ -274,8 +271,7 @@ final class AppDelegate: NSObject, NSApplicationDelegate, NSWindowDelegate {
         HotKeyCenter.shared.handlers[.cleanScreen] = { CleanScreen.shared.toggle() }
         HotKeyCenter.shared.applyAll()
 
-        // First run (after the mo gate — MoleInstallView is slide 0): the
-        // two onboarding slides, once. Finishing sets the flag; closing the
+        // First run: the two onboarding slides, once. Finishing sets the flag; closing the
         // window without finishing shows it again next launch. The dev
         // open-on-launch affordance below bypasses it (BURROW_OPEN_ON_LAUNCH
         // targets a specific pane; "onboarding" targets these slides).
@@ -344,16 +340,6 @@ final class AppDelegate: NSObject, NSApplicationDelegate, NSWindowDelegate {
     /// Finishing marks onboarding complete and opens the main window.
     @available(macOS 14, *)
     private func showOnboardingWindow() {
-        // Engine gate, restated at the onboarding door: the launch path
-        // already checks `mo` before startServices(), but onboarding can
-        // also be forced (BURROW_OPEN_ON_LAUNCH=onboarding) and the engine
-        // can vanish between gate and slides. The slides assume a working
-        // engine, so route into the guided install instead — its Recheck
-        // re-enters startServices() and lands back here.
-        guard MoleCLI.findExecutable() != nil else {
-            showInstallWindow()
-            return
-        }
         NSApp.setActivationPolicy(.regular)
         let window = NSWindow(
             contentRect: NSRect(x: 0, y: 0, width: 720, height: 560),

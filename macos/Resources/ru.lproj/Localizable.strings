@@ -375,6 +375,7 @@
 "Version" = "Версия";
 "incomplete" = "не завершено";
 "Reading your Mac…" = "Чтение данных вашего Mac…";
+"Collecting CPU, memory, disk, and process activity." = "Сбор данных о процессоре, памяти, диске и процессах.";
 
 /* Activity (cleanup history) */
 "Recent Mole cleanup sessions" = "Последние сеансы очистки Mole";

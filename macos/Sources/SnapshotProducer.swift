@@ -489,14 +489,28 @@ struct MoCLIStatusSource: StatusSource {
         // Prefer the bundled conductor (burrow status --json): its envelope `data` is the same
         // status JSON the snapshot pipeline decodes + patches, and it runs the bundled engine
         // (no system mo needed). Fall back to the direct engine on any miss.
-        if BurrowConductor.isAvailable,
-           let envelope = try? BurrowConductor.capture("status", timeout: 8),
-           let data = envelope.data,
-           let json = String(data: data, encoding: .utf8) {
-            return json
+        if BurrowConductor.isAvailable {
+            do {
+                let envelope = try BurrowConductor.capture("status", timeout: 8)
+                if let data = envelope.data,
+                   let json = String(data: data, encoding: .utf8) {
+                    return json
+                }
+            } catch {
+                NSLog("Burrow.MoStatus: bundled engine unavailable; using native status: \(error.localizedDescription)")
+            }
+            // `MoleCLI.findExecutable()` prefers the same bundled path, so asking the direct
+            // engine fallback here would merely execute the same broken file a second time.
+            return try NativeStatusSource().statusJSON()
         }
-        let result = try MoEngine.shared.capture(
-            MoCommand(target: .mo, args: ["status", "--json"], timeout: 8))
+        let result: Captured
+        do {
+            result = try MoEngine.shared.capture(
+                MoCommand(target: .mo, args: ["status", "--json"], timeout: 8))
+        } catch {
+            NSLog("Burrow.MoStatus: system engine unavailable; using native status: \(error.localizedDescription)")
+            return try NativeStatusSource().statusJSON()
+        }
         // `stderr=` was empty on every engine failure (the reason is in the `ok:false` envelope
         // on stdout), so this NSError carried an exit code and nothing else into the log the one
         // time anyone would want to read it.
@@ -505,9 +519,8 @@ struct MoCLIStatusSource: StatusSource {
                   .map({ String(decoding: $0, as: UTF8.self) }) else {
             let reason = BurrowEnvelope.failureReason(stdout: result.stdout, stderr: result.stderr)
                 .map { String($0.prefix(200)) } ?? "no error output"
-            throw NSError(domain: "Burrow.MoStatus", code: Int(result.exitCode), userInfo: [
-                NSLocalizedDescriptionKey: "mo status exit=\(result.exitCode): \(reason)",
-            ])
+            NSLog("Burrow.MoStatus: system engine failed (exit \(result.exitCode): \(reason)); using native status")
+            return try NativeStatusSource().statusJSON()
         }
         // Unwrapped for the same reason the conductor branch above unwraps: `MoleStatus` is a
         // STRICT decoder, and handing it the envelope instead of `data` throws on every required

@@ -81,9 +81,9 @@ struct StatusView: View {
         VStack(spacing: 10) {
             Spacer(minLength: 120)
             ProgressView().controlSize(.large)
-            Text("Waiting for the first sample…")
+            Text("Reading your Mac…")
                 .font(Brand.mono(12)).foregroundStyle(Brand.textSecondary)
-            Text("Burrow runs `mo status --json` on a timer; the first row lands within a tick.")
+            Text("Collecting CPU, memory, disk, and process activity.")
                 .font(Brand.mono(10)).foregroundStyle(Brand.textTertiary)
             Spacer()
         }

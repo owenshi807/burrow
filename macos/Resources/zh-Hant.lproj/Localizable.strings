@@ -375,6 +375,7 @@
 "Version" = "版本";
 "incomplete" = "未完成";
 "Reading your Mac…" = "正在讀取你的 Mac…";
+"Collecting CPU, memory, disk, and process activity." = "正在收集 CPU、記憶體、磁碟與處理程序活動。";
 
 /* Activity (cleanup history) */
 "Recent Mole cleanup sessions" = "最近的 Mole 清理紀錄";
