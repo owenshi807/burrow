@@ -106,6 +106,17 @@ enum MoleCLI {
         return BurrowConductor.executableURL()?.path
     }
 
+    /// Whether this exact path speaks the self-contained engine's inverted
+    /// dry-run/apply protocol. A bundled legacy conductor is trusted code too,
+    /// but it speaks mo-style argv and must never be translated.
+    static func usesBundledEngineSemantics(_ executable: String?) -> Bool {
+        guard let executable, executable == bundledExecutable() else { return false }
+        // Existing tests use this override specifically to model the new
+        // self-contained runtime without staging a real app resource tree.
+        if bundledExecutableOverride != nil { return true }
+        return BurrowConductor.runtimeKind == .selfContainedEngine
+    }
+
     /// The only engine Burrow may run as root. Homebrew prefixes are normally
     /// owned by the signed-in user, and `mo` is a shell program that sources
     /// adjacent files; checking `/opt/homebrew/bin/mo` once and executing it
@@ -160,7 +171,7 @@ enum MoleCLI {
         }
 
         let user = command.invokingUser
-        let environment = [
+        var environment = [
             "PATH=/usr/bin:/bin:/usr/sbin:/sbin",
             "HOME=\(user.canonicalHome)",
             "USER=\(user.username)",
@@ -169,6 +180,10 @@ enum MoleCLI {
             "SUDO_UID=\(user.uid)",
             "LC_ALL=C",
         ]
+        if command.executable.path == bundledExecutable(),
+           let legacy = BurrowConductor.legacyEngineDirectory() {
+            environment.append("BURROW_ENGINE_DIR=\(legacy.path)")
+        }
         let isolatedEnvironment = ["/usr/bin/env", "-i"] + environment
         let run: String
         if let cleanupPlan {

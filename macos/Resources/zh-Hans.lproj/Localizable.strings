@@ -364,6 +364,7 @@
 /* Common actions / labels */
 "Scan" = "扫描";
 "Rescan" = "重新扫描";
+"Scan failed" = "扫描失败";
 "Back" = "返回";
 "Stop" = "停止";
 "Stopped." = "已停止。";

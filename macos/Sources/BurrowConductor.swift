@@ -27,6 +27,15 @@ import Foundation
 
 enum BurrowConductor {
 
+    /// Two signed runtimes have shipped under `Resources/burrow`. The current
+    /// MIT engine is self-contained and uses `--apply`; Burrow 0.14's conductor
+    /// fronts `Resources/engine/mole` and keeps mo's `--dry-run` convention.
+    enum RuntimeKind: Equatable {
+        case unavailable
+        case selfContainedEngine
+        case legacyConductor
+    }
+
     // MARK: - Resolution
 
     /// Where the bundled sidecars are looked up. Production reads the app bundle; tests point it
@@ -56,6 +65,20 @@ enum BurrowConductor {
         return FileManager.default.isExecutableFile(atPath: burrow.path) ? burrow : nil
     }
 
+    static var runtimeKind: RuntimeKind {
+        guard executableURL() != nil else { return .unavailable }
+        return legacyEngineDirectory() == nil ? .selfContainedEngine : .legacyConductor
+    }
+
+    /// The official 0.14 layout. Requiring executable `engine/mole`, rather
+    /// than merely an `engine` directory, rejects partial bundles.
+    static func legacyEngineDirectory() -> URL? {
+        guard let res = resourceDirectory() else { return nil }
+        let engine = res.appendingPathComponent("engine", isDirectory: true)
+        let mole = engine.appendingPathComponent("mole")
+        return FileManager.default.isExecutableFile(atPath: mole.path) ? engine : nil
+    }
+
     /// The bundled `fclones` sidecar (Resources/fclones, from bundle-fclones.sh), or nil if this
     /// build didn't ship one. `burrow dupes` shells out to fclones; without a bundled copy it falls
     /// back to a `$BURROW_FCLONES`/PATH fclones, and if none exists the Duplicates pane shows
@@ -78,11 +101,8 @@ enum BurrowConductor {
         [command] + args + ["--json"]
     }
 
-    /// The environment for a conductor run: the inherited environment, plus the bundled fclones
-    /// path and an augmented PATH. There used to be a third thing here — BURROW_ENGINE_DIR,
-    /// pointing the OLD conductor at a sibling digger directory it would otherwise walk up
-    /// looking for. The engine looks for nothing: it does the work itself, so that variable is
-    /// gone along with the digger it existed to locate.
+    /// The environment for a bundled run. Legacy 0.14 conductors need their
+    /// sibling engine directory named explicitly; self-contained engines do not.
     static func environment() -> [String: String] {
         // Fully qualified: the Burrow module has its own `ProcessInfo` (a status model), which
         // would otherwise shadow Foundation's here.
@@ -91,6 +111,11 @@ enum BurrowConductor {
         // own $BURROW_FCLONES if they set one (they may prefer a newer/system fclones).
         if env["BURROW_FCLONES"] == nil, let fclones = fclonesURL() {
             env["BURROW_FCLONES"] = fclones.path
+        }
+        if let legacy = legacyEngineDirectory() {
+            env["BURROW_ENGINE_DIR"] = legacy.path
+        } else {
+            env.removeValue(forKey: "BURROW_ENGINE_DIR")
         }
         env["PATH"] = augmentedPATH(env["PATH"])
         return env
@@ -218,6 +243,23 @@ enum BurrowConductor {
         engineArgv(fromMo: moArgs) + ["--stream"]
     }
 
+    /// Shape mo-style argv for whichever signed runtime actually shipped.
+    /// Keeping this decision beside runtime detection prevents a preview from
+    /// becoming a live clean when a legacy conductor is used as fallback.
+    static func bundledArgv(fromMo moArgs: [String], streaming: Bool) -> [String] {
+        let base: [String]
+        switch runtimeKind {
+        case .legacyConductor:
+            base = moArgs
+        case .selfContainedEngine:
+            base = engineArgv(fromMo: moArgs)
+        case .unavailable:
+            base = moArgs
+        }
+        guard streaming, !base.contains("--stream") else { return base }
+        return base + ["--stream"]
+    }
+
     /// Whether a streaming run should be hand routed through the bundled conductor (`burrow <cmd>
     /// --stream`) instead of spawning `mo`/the direct engine — pure, and independent of whether a
     /// conductor binary actually resolves (that needs a real app bundle; see `streamOverride`).
@@ -247,7 +289,7 @@ enum BurrowConductor {
         guard let command = moArgs.first,
               shouldStreamViaConductor(command: command),
               let burrow = executableURL()?.path else { return nil }
-        return (burrow, streamArgv(fromMo: moArgs))
+        return (burrow, bundledArgv(fromMo: moArgs, streaming: true))
     }
 }
 

@@ -45,9 +45,10 @@ build fails safely to scanner-only review when Codex is absent or unavailable.
 ## Distribution note
 
 The upstream engine submodule is not publicly accessible. This personal preview
-bundles the universal `burrow` engine and `fclones` sidecar from the installed
-Burrow 0.14.0 (build 26), which exactly matches this fork's upstream baseline;
-the complete app is then re-signed and notarized as one distribution.
+bundles the complete universal legacy runtime — both `Resources/burrow` and its
+required `Resources/engine` tree — from the official Burrow 0.14.0 release ZIP,
+plus the `fclones` sidecar. The complete app is then re-signed and notarized as
+one distribution. A conductor without its sibling engine is rejected at build time.
 
 ## Original app icon
 

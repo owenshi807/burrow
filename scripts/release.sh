@@ -46,6 +46,7 @@ xcodebuild -project macos/Burrow.xcodeproj -scheme Burrow \
   POSTHOG_HOST="${POSTHOG_HOST:-https://us.i.posthog.com}" \
   SENTRY_DSN="${SENTRY_DSN:-}" \
   ${BURROW_ENGINE_SRC:+BURROW_ENGINE_SRC="$BURROW_ENGINE_SRC"} \
+  ${BURROW_LEGACY_RESOURCES:+BURROW_LEGACY_RESOURCES="$BURROW_LEGACY_RESOURCES"} \
   build
 
 APP="build_dist/Build/Products/Release/Burrow.app"

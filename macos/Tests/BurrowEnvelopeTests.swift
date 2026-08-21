@@ -87,11 +87,30 @@ final class BurrowEnvelopeTests: XCTestCase {
                        ["status", "--json"])
     }
 
-    func testConductorEnvironment_neverSetsEngineDir() {
-        // BURROW_ENGINE_DIR named the OLD conductor at the digger's runtime directory (a sibling
-        // Resources/engine this app layout never had post-repoint). The engine looks for nothing,
-        // so this key must never be (re)introduced.
-        XCTAssertNil(BurrowConductor.environment()["BURROW_ENGINE_DIR"])
+    func testSelfContainedEngineEnvironment_hasNoEngineDir() {
+        ConductorBundleFixture.withConductor(present: true) {
+            XCTAssertEqual(BurrowConductor.runtimeKind, .selfContainedEngine)
+            XCTAssertNil(BurrowConductor.environment()["BURROW_ENGINE_DIR"])
+        }
+    }
+
+    func testLegacyConductorEnvironment_pointsAtSiblingEngine() {
+        ConductorBundleFixture.withConductor(present: true, legacyEngine: true) {
+            XCTAssertEqual(BurrowConductor.runtimeKind, .legacyConductor)
+            let expected = try? XCTUnwrap(BurrowConductor.resourceDirectory()?.appendingPathComponent("engine").path)
+            XCTAssertEqual(BurrowConductor.environment()["BURROW_ENGINE_DIR"], expected)
+        }
+    }
+
+    func testLegacyConductorPreservesMoDryRunSemanticsWhenStreaming() {
+        withStreamSwitch(true) {
+            ConductorBundleFixture.withConductor(present: true, legacyEngine: true) {
+                let preview = BurrowConductor.streamOverride(moArgs: ["clean", "--dry-run"])
+                XCTAssertEqual(preview?.arguments, ["clean", "--dry-run", "--stream"])
+                let live = BurrowConductor.streamOverride(moArgs: ["clean"])
+                XCTAssertEqual(live?.arguments, ["clean", "--stream"])
+            }
+        }
     }
 
     // MARK: PATH augmentation (the Finder-launch trap — brew sidecars/engine shell-outs)

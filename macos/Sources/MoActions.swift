@@ -69,7 +69,7 @@ struct EngineTarget: Equatable {
     static func resolve(elevated: Bool) -> EngineTarget {
         let resolved = elevated ? MoleCLI.trustedExecutable() : MoleCLI.findExecutable()
         return EngineTarget(path: resolved,
-                            isBundledEngine: resolved != nil && resolved == MoleCLI.bundledExecutable())
+                            isBundledEngine: MoleCLI.usesBundledEngineSemantics(resolved))
     }
 }
 

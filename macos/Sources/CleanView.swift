@@ -28,6 +28,16 @@ import AppKit
 /// plus the live byte total the count-up hero renders.
 typealias CleanDryReport = (groups: [TaskGroup], summary: TaskSummary?, liveBytes: Int64)
 
+enum CleanScanFinishedPresentation: Equatable {
+    case result
+    case failure(String)
+
+    static func from(_ outcome: OperationFlow<CleanDryReport>.Outcome) -> Self {
+        if case .failed(let message) = outcome { return .failure(message) }
+        return .result
+    }
+}
+
 struct CleanView: View {
     @StateObject private var dryFlow = OperationFlow<CleanDryReport>()
     @StateObject private var realFlow = OperationFlow<TaskRunReport>()
@@ -70,18 +80,23 @@ struct CleanView: View {
                         onCancel: { dryFlow.reset() })
                 case .running:
                     scanHero(final: false)
-                case .finished:
-                    if screen == .review, reviewList != nil {
-                        CleanReviewView(planStore: agentPlan,
-                                        onEnableAgent: {
-                                            cleanupAgentConsent = true
-                                            agentPlan.startAgentAnalysis()
-                                        },
-                                        onRetryAgent: { agentPlan.startAgentAnalysis() },
-                                        onConfirm: { confirmClean($0) },
-                                        onExit: { screen = .hero })
-                    } else {
-                        scanHero(final: true)
+                case .finished(let outcome):
+                    switch CleanScanFinishedPresentation.from(outcome) {
+                    case .failure(let message):
+                        scanFailureHero(message)
+                    case .result:
+                        if screen == .review, reviewList != nil {
+                            CleanReviewView(planStore: agentPlan,
+                                            onEnableAgent: {
+                                                cleanupAgentConsent = true
+                                                agentPlan.startAgentAnalysis()
+                                            },
+                                            onRetryAgent: { agentPlan.startAgentAnalysis() },
+                                            onConfirm: { confirmClean($0) },
+                                            onExit: { screen = .hero })
+                        } else {
+                            scanHero(final: true)
+                        }
                     }
                 case .idle:
                     idleHero
@@ -227,6 +242,17 @@ struct CleanView: View {
             Spacer(); Spacer()
         }
         .frame(maxWidth: .infinity, maxHeight: .infinity)
+    }
+
+    private func scanFailureHero(_ message: String) -> some View {
+        ToolHero(tool: .clean,
+                 title: NSLocalizedString("Scan failed", comment: "cleanup scan failure"),
+                 subtitle: message) {
+            PillButton(title: "Rescan") { startDry() }
+            Button { dryFlow.reset(); screen = .hero } label: {
+                Text("Back").font(Brand.sans(12)).foregroundStyle(Brand.textSecondary)
+            }.buttonStyle(.plain)
+        }
     }
 
     /// "Limited scan active" chip with the demoted gate's explainer.

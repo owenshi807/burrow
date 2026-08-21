@@ -267,7 +267,9 @@ final class PTYTask: PTYPort {
         proc.standardInput = slave
         proc.standardOutput = slave
         proc.standardError = slave
-        var env = Foundation.ProcessInfo.processInfo.environment
+        var env = executable == MoleCLI.bundledExecutable()
+            ? BurrowConductor.environment()
+            : Foundation.ProcessInfo.processInfo.environment
         env["TERM"] = "xterm-256color"
         proc.environment = env
         // Capture the id, not `gen` — a Process retains its terminationHandler,

@@ -26,6 +26,7 @@ enum ConductorBundleFixture {
     /// it is written as a shell script that emits a valid empty envelope so that a future test
     /// which does run it gets something parseable rather than a crash.
     static func withConductor<T>(present: Bool,
+                                 legacyEngine: Bool = false,
                                  file: StaticString = #filePath, line: UInt = #line,
                                  _ body: () throws -> T) rethrows -> T {
         let dir = FileManager.default.temporaryDirectory
@@ -38,6 +39,15 @@ enum ConductorBundleFixture {
                 atPath: stub.path,
                 contents: Data("#!/bin/sh\nprintf '{\"ok\":true,\"data\":{}}'\n".utf8),
                 attributes: [.posixPermissions: 0o755])
+
+            if legacyEngine {
+                let engine = dir.appendingPathComponent("engine", isDirectory: true)
+                try? FileManager.default.createDirectory(at: engine, withIntermediateDirectories: true)
+                FileManager.default.createFile(
+                    atPath: engine.appendingPathComponent("mole").path,
+                    contents: Data("#!/bin/sh\nexit 0\n".utf8),
+                    attributes: [.posixPermissions: 0o755])
+            }
         }
 
         let saved = BurrowConductor.resourceDirectory

@@ -16,7 +16,7 @@ settings:
     # The only app/build version declarations. The generated Info.plist keeps
     # these build-setting references, and Xcode expands them in the product.
     MARKETING_VERSION: "0.14.0"
-    CURRENT_PROJECT_VERSION: "29"
+    CURRENT_PROJECT_VERSION: "30"
     ENABLE_HARDENED_RUNTIME: YES
     # Xcode leaves signing off for reproducible builds. Local scripts apply a
     # coherent ad-hoc signature; the tag workflow applies Developer ID after
@@ -152,14 +152,18 @@ targets:
           # Cargo.toml + src/ + cargo so we bundle only a populated checkout, and otherwise fall
           # through to the system engine (build still green).
           if [ -f "$ENGINE_SRC/Cargo.toml" ] && [ -d "$ENGINE_SRC/src" ] && command -v cargo >/dev/null 2>&1; then
+            rm -rf "$TARGET_BUILD_DIR/$UNLOCALIZED_RESOURCES_FOLDER_PATH/engine"
             "$SRCROOT/scripts/bundle-burrow.sh" "$ENGINE_SRC" "$TARGET_BUILD_DIR/$UNLOCALIZED_RESOURCES_FOLDER_PATH" \
               || echo "warning: burrow-engine build failed — Burrow falls back to a system engine."
+          elif [ -x "${BURROW_LEGACY_RESOURCES:-}/burrow" ] && [ -x "${BURROW_LEGACY_RESOURCES:-}/engine/mole" ]; then
+            "$SRCROOT/scripts/bundle-legacy-engine.sh" "$BURROW_LEGACY_RESOURCES" "$TARGET_BUILD_DIR/$UNLOCALIZED_RESOURCES_FOLDER_PATH"
           else
             # Post-build scripts run in a persistent DerivedData product directory. Without this,
             # an engine from ANY earlier checkout/build survives and is silently re-signed into
             # the new app. That is how the obsolete 0.0.1 conductor entered build 28.
             rm -f "$TARGET_BUILD_DIR/$UNLOCALIZED_RESOURCES_FOLDER_PATH/burrow"
-            echo "warning: burrow-engine source or cargo not present at $ENGINE_SRC — Burrow falls back to a system engine. Set BURROW_ENGINE_SRC or init the vendor/burrow-engine submodule."
+            rm -rf "$TARGET_BUILD_DIR/$UNLOCALIZED_RESOURCES_FOLDER_PATH/engine"
+            echo "warning: no complete engine runtime — Burrow falls back to native status/system tools. Set BURROW_ENGINE_SRC or BURROW_LEGACY_RESOURCES."
           fi
       - name: Bundle fclones (MIT sidecar)
         basedOnDependencyAnalysis: false

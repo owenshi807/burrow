@@ -893,7 +893,7 @@ final class SoftwareModel: ObservableObject {
     nonisolated private static func fetchPreview(for app: InstalledApp) -> UninstallPreview {
         let resolved = MoleCLI.findExecutable()
         let source = uninstallTarget(for: app,
-                                     resolvedIsBundledEngine: resolved != nil && resolved == MoleCLI.bundledExecutable())
+                                     resolvedIsBundledEngine: MoleCLI.usesBundledEngineSemantics(resolved))
         // Spawn the file this resolution named, not a second lookup: `source` above already
         // decided what to SAY to the binary, and the two answers have to be about the same one.
         // `/usr/bin/false` for an unresolved lookup is the same degradation `.mo` already gave.

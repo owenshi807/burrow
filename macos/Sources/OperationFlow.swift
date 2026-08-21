@@ -270,8 +270,11 @@ final class OperationFlow<Report: Sendable>: ObservableObject {
                 // bundle itself is missing) speaks mo's own convention, and translating that one
                 // unconditionally would turn an elevated preview ("Scan with admin") into a live
                 // delete on it instead.
-                if let resolved, resolved == MoleCLI.bundledExecutable() {
+                if MoleCLI.usesBundledEngineSemantics(resolved) {
                     arguments = BurrowConductor.engineArgv(fromMo: op.arguments)
+                } else if let resolved, resolved == MoleCLI.bundledExecutable() {
+                    arguments = BurrowConductor.bundledArgv(fromMo: op.arguments,
+                                                             streaming: false)
                 }
             }
         case .path(let p): exe = p
@@ -667,6 +670,9 @@ struct SystemProcessPort: ProcessPort {
             } else {
                 t.executableURL = URL(fileURLWithPath: spec.executable)
                 t.arguments = spec.arguments
+                if spec.executable == MoleCLI.bundledExecutable() {
+                    t.environment = BurrowConductor.environment()
+                }
                 t.standardOutput = outPipe
                 t.standardError = errPipe
                 if let stdin = spec.stdin {

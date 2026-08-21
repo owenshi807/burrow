@@ -395,6 +395,14 @@ struct HelperAwareProcessPort: ProcessPort {
         // common path costs nothing.
         guard spec.elevated else { return fallback.events(spec) }
 
+        // The build-matched helper intentionally constructs a minimal root
+        // environment and cannot be client-directed to an engine directory.
+        // Legacy 0.14 conductors require BURROW_ENGINE_DIR, so keep them on the
+        // signed osascript path which derives that fixed bundle path locally.
+        guard BurrowConductor.runtimeKind != .legacyConductor else {
+            return fallback.events(spec)
+        }
+
         return AsyncStream { continuation in
             // Routing asks the daemon for its version, and executing blocks
             // for as long as the user takes to authenticate. Neither may

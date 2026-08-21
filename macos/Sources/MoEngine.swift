@@ -169,11 +169,13 @@ final class MoEngine {
             executable = path
         }
 
+        let environment = command.environment
+            ?? (executable == MoleCLI.bundledExecutable() ? BurrowConductor.environment() : nil)
         let result = try MoleProcess.capture(
             executable: executable,
             args: command.args,
             stdin: command.stdin,
-            environment: command.environment,
+            environment: environment,
             timeout: command.timeout,
             port: processPort
         )
