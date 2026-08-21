@@ -99,10 +99,8 @@ struct CleanReviewView: View {
     private var agentStatusChip: some View {
         switch planStore.agentState {
         case .analyzing(let agent):
-            HStack(spacing: 5) {
-                ProgressView().controlSize(.mini).tint(accent)
-                Text(String(format: NSLocalizedString("%@ analyzing", comment: ""), agent))
-            }.agentChip(color: accent)
+            Label(String(format: NSLocalizedString("%@ analyzing", comment: ""), agent), systemImage: "sparkles")
+                .agentChip(color: accent)
         case .ready(let agent, _):
             Label(String(format: NSLocalizedString("Reviewed by %@", comment: ""), agent), systemImage: "sparkles")
                 .agentChip(color: accent)
@@ -120,6 +118,10 @@ struct CleanReviewView: View {
     @ViewBuilder
     private var agentDisclosure: some View {
         switch planStore.agentState {
+        case .analyzing(let agent):
+            if let progress = planStore.agentProgress {
+                agentRunningDisclosure(agent: agent, progress: progress)
+            }
         case .consentRequired:
             HStack(alignment: .top, spacing: 12) {
                 Image(systemName: "sparkles").font(.system(size: 15)).foregroundStyle(accent)
@@ -146,17 +148,131 @@ struct CleanReviewView: View {
             }
             .padding(12).background(RoundedRectangle(cornerRadius: 12).fill(Brand.amber.opacity(0.08)))
         case .ready(_, let summary):
-            if !summary.isEmpty {
-                HStack(alignment: .top, spacing: 10) {
-                    Image(systemName: "sparkles").foregroundStyle(accent)
-                    Text(summary).font(Brand.sans(10)).foregroundStyle(Brand.textSecondary)
-                        .fixedSize(horizontal: false, vertical: true)
-                }
-                .padding(12).background(RoundedRectangle(cornerRadius: 12).fill(accent.opacity(0.06)))
-            }
+            agentCompletedDisclosure(summary: summary)
         default:
             EmptyView()
         }
+    }
+
+    private func agentRunningDisclosure(agent: String, progress: CleanupAgentProgress) -> some View {
+        TimelineView(.periodic(from: .now, by: 1)) { context in
+            VStack(alignment: .leading, spacing: 12) {
+                HStack(alignment: .top, spacing: 11) {
+                    Image(systemName: "sparkles")
+                        .font(.system(size: 14, weight: .semibold)).foregroundStyle(accent)
+                        .frame(width: 30, height: 30)
+                        .background(RoundedRectangle(cornerRadius: 9).fill(accent.opacity(0.13)))
+                    VStack(alignment: .leading, spacing: 3) {
+                        Text(String(
+                            format: NSLocalizedString("%@ is analyzing %d candidates", comment: "cleanup Agent active title"),
+                            agent, progress.candidateCount))
+                            .font(Brand.sans(13, .semibold)).foregroundStyle(Brand.textPrimary)
+                        Text(activeAgentDetail(progress.phase))
+                            .font(Brand.sans(10)).foregroundStyle(Brand.textSecondary)
+                    }
+                    Spacer()
+                    VStack(alignment: .trailing, spacing: 3) {
+                        Text(elapsedText(progress.elapsed(at: context.date)))
+                            .font(Brand.mono(11, .medium)).foregroundStyle(accent)
+                        Text(NSLocalizedString("Usually 2-5 minutes", comment: "cleanup Agent expected duration"))
+                            .font(Brand.sans(9)).foregroundStyle(Brand.textTertiary)
+                    }
+                }
+
+                HStack(spacing: 7) {
+                    agentPhase("Candidates prepared", symbol: "checkmark.circle.fill", state: .done)
+                    agentPhaseConnector(done: true)
+                    agentPhase("Relationships", symbol: "point.3.connected.trianglepath.dotted",
+                               state: progress.phase == .investigating ? .active : .done)
+                    agentPhaseConnector(done: progress.phase != .investigating)
+                    agentPhase("Safety check", symbol: "shield.checkered",
+                               state: progress.phase == .validating ? .active : .pending)
+                }
+                .accessibilityElement(children: .combine)
+                .accessibilityLabel(agentProgressAccessibility(progress))
+            }
+            .padding(13)
+            .background(RoundedRectangle(cornerRadius: 14, style: .continuous).fill(accent.opacity(0.075)))
+            .overlay(RoundedRectangle(cornerRadius: 14, style: .continuous).strokeBorder(accent.opacity(0.24)))
+        }
+    }
+
+    private func agentCompletedDisclosure(summary: String) -> some View {
+        let reviewed = planStore.agentProgress?.reviewedCount ?? planStore.totalCount
+        let duration = planStore.agentProgress.map { elapsedText($0.elapsed()) }
+        return HStack(alignment: .top, spacing: 11) {
+            Image(systemName: "checkmark.circle.fill")
+                .font(.system(size: 15)).foregroundStyle(accent)
+            VStack(alignment: .leading, spacing: 4) {
+                Text(String(
+                    format: NSLocalizedString("Codex completed %d judgments", comment: "cleanup Agent completed title"),
+                    reviewed))
+                    .font(Brand.sans(12, .semibold)).foregroundStyle(Brand.textPrimary)
+                if let duration {
+                    Text(String(
+                        format: NSLocalizedString("Finished in %@. Burrow safety checks passed.", comment: "cleanup Agent completion metadata"),
+                        duration))
+                        .font(Brand.mono(9)).foregroundStyle(Brand.textTertiary)
+                }
+                if !summary.isEmpty {
+                    Text(summary).font(Brand.sans(10)).foregroundStyle(Brand.textSecondary)
+                        .fixedSize(horizontal: false, vertical: true)
+                }
+            }
+        }
+        .padding(12)
+        .background(RoundedRectangle(cornerRadius: 12, style: .continuous).fill(accent.opacity(0.06)))
+    }
+
+    private enum AgentPhaseVisualState: Equatable { case done, active, pending }
+
+    private func agentPhase(_ title: String, symbol: String,
+                            state: AgentPhaseVisualState) -> some View {
+        let color: Color = state == .pending ? Brand.textTertiary : accent
+        return HStack(spacing: 5) {
+            Image(systemName: symbol).font(.system(size: 10, weight: .semibold))
+            Text(NSLocalizedString(title, comment: "cleanup Agent progress phase"))
+                .font(Brand.sans(9, state == .active ? .semibold : .regular))
+        }
+        .foregroundStyle(color)
+        .padding(.horizontal, 8).padding(.vertical, 5)
+        .background(Capsule().fill(state == .active ? accent.opacity(0.14) : Color.clear))
+    }
+
+    private func agentPhaseConnector(done: Bool) -> some View {
+        Rectangle().fill(done ? accent.opacity(0.65) : Brand.hairline)
+            .frame(maxWidth: 22).frame(height: 1)
+    }
+
+    private func activeAgentDetail(_ phase: CleanupAgentProgress.Phase) -> String {
+        switch phase {
+        case .investigating:
+            return NSLocalizedString(
+                "Checking app ownership, version relationships, active references, and rebuildability.",
+                comment: "cleanup Agent investigation detail")
+        case .validating:
+            return NSLocalizedString(
+                "Codex has returned. Burrow is applying deterministic safety rules.",
+                comment: "cleanup Agent validation detail")
+        case .completed:
+            return NSLocalizedString("Analysis complete.", comment: "cleanup Agent completed detail")
+        }
+    }
+
+    private func agentProgressAccessibility(_ progress: CleanupAgentProgress) -> String {
+        let phase: String
+        switch progress.phase {
+        case .investigating: phase = NSLocalizedString("Relationships in progress", comment: "")
+        case .validating: phase = NSLocalizedString("Safety check in progress", comment: "")
+        case .completed: phase = NSLocalizedString("Analysis complete", comment: "")
+        }
+        return String(format: NSLocalizedString("%@, %@ elapsed", comment: "cleanup Agent progress accessibility"),
+                      phase, elapsedText(progress.elapsed()))
+    }
+
+    private func elapsedText(_ interval: TimeInterval) -> String {
+        let seconds = max(0, Int(interval))
+        return String(format: "%d:%02d", seconds / 60, seconds % 60)
     }
 
     private func iconButton(_ symbol: String, help: String, action: @escaping () -> Void) -> some View {

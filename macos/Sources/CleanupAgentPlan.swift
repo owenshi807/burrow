@@ -94,6 +94,35 @@ struct CleanupDecisionSection: Identifiable, Equatable {
     var id: String { disposition.rawValue + "\u{1f}" + category }
 }
 
+struct CleanupAgentProgress: Equatable {
+    enum Phase: Equatable {
+        case investigating
+        case validating
+        case completed
+    }
+
+    let startedAt: Date
+    let candidateCount: Int
+    var phase: Phase
+    var reviewedCount: Int?
+    var finishedAt: Date?
+
+    func elapsed(at date: Date = Date()) -> TimeInterval {
+        max(0, (finishedAt ?? date).timeIntervalSince(startedAt))
+    }
+}
+
+private enum CleanupAgentRunError: LocalizedError {
+    case timedOut
+
+    var errorDescription: String? {
+        NSLocalizedString(
+            "Codex did not finish within 10 minutes. Nothing was changed. Retry when the Agent is available.",
+            comment: "cleanup Agent timeout"
+        )
+    }
+}
+
 @MainActor
 final class CleanupPlanStore: ObservableObject {
     enum AgentState: Equatable {
@@ -112,15 +141,19 @@ final class CleanupPlanStore: ObservableObject {
     @Published private(set) var selection: CleanSelection?
     @Published private(set) var selectedCandidateId: String?
     @Published private(set) var agentState: AgentState = .idle
+    @Published private(set) var agentProgress: CleanupAgentProgress?
     @Published private(set) var userOverrides: Set<String> = []
 
     private var pathToCandidateId: [String: String] = [:]
     private var currentAgentRunId: UUID?
     private var analysisTask: Task<Void, Never>?
     private let analyzer: any CleanupAgentAnalyzing
+    private let analysisTimeoutNanoseconds: UInt64
 
-    init(analyzer: any CleanupAgentAnalyzing = CodexCleanupAgentAdapter()) {
+    init(analyzer: any CleanupAgentAnalyzing = CodexCleanupAgentAdapter(),
+         analysisTimeoutNanoseconds: UInt64 = 600_000_000_000) {
         self.analyzer = analyzer
+        self.analysisTimeoutNanoseconds = analysisTimeoutNanoseconds
     }
 
     deinit { analysisTask?.cancel() }
@@ -136,6 +169,7 @@ final class CleanupPlanStore: ObservableObject {
         revision = 1
         userOverrides = []
         currentAgentRunId = nil
+        agentProgress = nil
         // Paths are the identity shared by selection, authorization and the
         // Agent. The scanner has emitted duplicate paths in production, so
         // canonicalize here too: callers can construct a CleanList directly
@@ -195,9 +229,19 @@ final class CleanupPlanStore: ObservableObject {
                     sensitivePathHint: SensitiveRemnantMatcher.isSensitive(candidate.path))
             })
         agentState = .analyzing(agent: analyzer.displayName)
+        agentProgress = CleanupAgentProgress(
+            startedAt: Date(), candidateCount: candidates.count,
+            phase: .investigating, reviewedCount: nil, finishedAt: nil)
+        let timeout = analysisTimeoutNanoseconds
         analysisTask = Task { [weak self, analyzer] in
             do {
-                let analysis = try await analyzer.analyze(input)
+                let analysis = try await Self.analyze(input, with: analyzer, timeoutNanoseconds: timeout)
+                guard !Task.isCancelled else { return }
+                self?.markValidating(runId: runId)
+                // The validation is real and normally sub-frame. Keep the
+                // named phase visible briefly so the transition is legible,
+                // without pretending that it represents a percentage.
+                try await Task.sleep(nanoseconds: 240_000_000)
                 guard !Task.isCancelled else { return }
                 self?.apply(analysis, runId: runId, baseRevision: baseRevision)
             } catch {
@@ -321,6 +365,9 @@ final class CleanupPlanStore: ObservableObject {
         }
         selection = nextSelection
         revision += accepted > 0 ? 1 : 0
+        agentProgress?.phase = .completed
+        agentProgress?.reviewedCount = accepted
+        agentProgress?.finishedAt = Date()
         if accepted == candidates.count {
             agentState = .ready(agent: analyzer.displayName, summary: analysis.summary)
         } else if accepted > 0 {
@@ -345,7 +392,32 @@ final class CleanupPlanStore: ObservableObject {
 
     private func finishDegraded(_ error: Error, runId: UUID) {
         guard currentAgentRunId == runId else { return }
+        agentProgress?.finishedAt = Date()
         agentState = .degraded(agent: analyzer.displayName, reason: error.localizedDescription)
+    }
+
+    private func markValidating(runId: UUID) {
+        guard currentAgentRunId == runId else { return }
+        agentProgress?.phase = .validating
+    }
+
+    private static func analyze(
+        _ input: CleanupAgentAnalysisInput,
+        with analyzer: any CleanupAgentAnalyzing,
+        timeoutNanoseconds: UInt64
+    ) async throws -> CleanupAgentAnalysis {
+        try await withThrowingTaskGroup(of: CleanupAgentAnalysis.self) { group in
+            group.addTask { try await analyzer.analyze(input) }
+            group.addTask {
+                try await Task.sleep(nanoseconds: timeoutNanoseconds)
+                throw CleanupAgentRunError.timedOut
+            }
+            guard let result = try await group.next() else {
+                throw CleanupAgentRunError.timedOut
+            }
+            group.cancelAll()
+            return result
+        }
     }
 
     private func setAll(selected shouldSelect: Bool) {

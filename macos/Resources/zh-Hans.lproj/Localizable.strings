@@ -882,6 +882,21 @@
 /* Agent-assisted cleanup plan */
 "Agent judgments and scanner facts share one staged plan. Your edits always win." = "Agent 判断与扫描器事实共用同一份待执行方案。你的修改始终优先。";
 "%@ analyzing" = "%@ 正在分析";
+"%@ is analyzing %d candidates" = "%1$@ 正在分析 %2$d 个候选项";
+"Usually 2-5 minutes" = "通常需要 2-5 分钟";
+"Candidates prepared" = "候选已整理";
+"Relationships" = "关系判断";
+"Safety check" = "安全校验";
+"Checking app ownership, version relationships, active references, and rebuildability." = "正在检查应用归属、版本关系、活动引用和可重建性。";
+"Codex has returned. Burrow is applying deterministic safety rules." = "Codex 已返回。Burrow 正在应用确定性安全规则。";
+"Analysis complete." = "分析完成。";
+"Relationships in progress" = "正在判断关系";
+"Safety check in progress" = "正在进行安全校验";
+"Analysis complete" = "分析完成";
+"%@, %@ elapsed" = "%1$@，已用时 %2$@";
+"Codex completed %d judgments" = "Codex 已完成 %d 项判断";
+"Finished in %@. Burrow safety checks passed." = "用时 %@。Burrow 安全校验已通过。";
+"Codex did not finish within 10 minutes. Nothing was changed. Retry when the Agent is available." = "Codex 在 10 分钟内未完成。没有更改任何内容，请在 Agent 可用时重试。";
 "Reviewed by %@" = "已由 %@ 分析";
 "%@ unavailable" = "%@ 暂不可用";
 "Agent off" = "Agent 未启用";

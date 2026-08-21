@@ -882,6 +882,21 @@
 /* Agent-assisted cleanup plan */
 "Agent judgments and scanner facts share one staged plan. Your edits always win." = "Решения агента и данные сканера образуют единый план. Ваши правки всегда имеют приоритет.";
 "%@ analyzing" = "%@ анализирует";
+"%@ is analyzing %d candidates" = "%1$@ анализирует кандидатов: %2$d";
+"Usually 2-5 minutes" = "Обычно 2-5 минут";
+"Candidates prepared" = "Кандидаты готовы";
+"Relationships" = "Связи";
+"Safety check" = "Проверка безопасности";
+"Checking app ownership, version relationships, active references, and rebuildability." = "Проверяются принадлежность приложениям, связи версий, активные ссылки и возможность восстановления.";
+"Codex has returned. Burrow is applying deterministic safety rules." = "Codex вернул результат. Burrow применяет детерминированные правила безопасности.";
+"Analysis complete." = "Анализ завершён.";
+"Relationships in progress" = "Проверяются связи";
+"Safety check in progress" = "Выполняется проверка безопасности";
+"Analysis complete" = "Анализ завершён";
+"%@, %@ elapsed" = "%1$@, прошло %2$@";
+"Codex completed %d judgments" = "Codex завершил решений: %d";
+"Finished in %@. Burrow safety checks passed." = "Завершено за %@. Проверки безопасности Burrow пройдены.";
+"Codex did not finish within 10 minutes. Nothing was changed. Retry when the Agent is available." = "Codex не завершил работу за 10 минут. Ничего не изменено. Повторите попытку, когда агент будет доступен.";
 "Reviewed by %@" = "Проверено: %@";
 "%@ unavailable" = "%@ недоступен";
 "Agent off" = "Агент выключен";

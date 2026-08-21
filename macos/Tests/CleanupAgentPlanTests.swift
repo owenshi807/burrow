@@ -74,6 +74,53 @@ final class CleanupAgentPlanTests: XCTestCase {
         XCTAssertFalse(store.canUseAgentCTA)
     }
 
+    func testAgentProgressExposesRealStagesCandidateCountAndCompletion() async throws {
+        let fixture = try makeFixture()
+        let analyzer = FakeCleanupAnalyzer(delay: 60_000_000) { input in
+            CleanupAgentAnalysis(summary: "done", recommendations: input.candidates.map {
+                .init(candidateId: $0.candidateId, disposition: .delete,
+                      reason: "Rebuildable.", consequence: "Recreated later.",
+                      confidence: 0.9, evidence: [])
+            })
+        }
+        let store = CleanupPlanStore(analyzer: analyzer)
+        store.load(list: fixture.list, snapshot: fixture.snapshot, locked: [:], hasAgentConsent: true)
+        store.startAgentAnalysis()
+
+        XCTAssertEqual(store.agentProgress?.candidateCount, 2)
+        XCTAssertEqual(store.agentProgress?.phase, .investigating)
+        try await waitUntilProgress(store, phase: .validating)
+        try await waitUntilReady(store)
+
+        XCTAssertEqual(store.agentProgress?.phase, .completed)
+        XCTAssertEqual(store.agentProgress?.reviewedCount, 2)
+        XCTAssertGreaterThan(store.agentProgress?.elapsed() ?? 0, 0)
+    }
+
+    func testAgentTimeoutBecomesVisibleFailureAndDoesNotChangeSelection() async throws {
+        let fixture = try makeFixture()
+        let analyzer = FakeCleanupAnalyzer(delay: 2_000_000_000) { input in
+            CleanupAgentAnalysis(summary: "late", recommendations: input.candidates.map {
+                .init(candidateId: $0.candidateId, disposition: .keep,
+                      reason: "Late.", consequence: "None.", confidence: 1, evidence: [])
+            })
+        }
+        let store = CleanupPlanStore(analyzer: analyzer, analysisTimeoutNanoseconds: 5_000_000)
+        store.load(list: fixture.list, snapshot: fixture.snapshot, locked: [:], hasAgentConsent: true)
+        let originalSelectedCount = store.selectedCount
+        let originalSelectedBytes = store.selectedBytes
+        store.startAgentAnalysis()
+        try await waitUntilFinished(store)
+
+        guard case .degraded(_, let reason) = store.agentState else {
+            return XCTFail("timeout must become a visible degraded state")
+        }
+        XCTAssertTrue(reason.contains("10"))
+        XCTAssertEqual(store.selectedCount, originalSelectedCount)
+        XCTAssertEqual(store.selectedBytes, originalSelectedBytes)
+        XCTAssertEqual(store.agentProgress?.phase, .investigating)
+    }
+
     func testLockedCandidateCannotBeSelectedByAgent() async throws {
         let fixture = try makeFixture()
         let lockedPath = fixture.list.categories[0].items[0].path
@@ -212,5 +259,14 @@ final class CleanupAgentPlanTests: XCTestCase {
             try await Task.sleep(nanoseconds: 10_000_000)
         }
         XCTFail("Agent analysis timed out")
+    }
+
+    private func waitUntilProgress(_ store: CleanupPlanStore,
+                                   phase: CleanupAgentProgress.Phase) async throws {
+        for _ in 0..<100 {
+            if store.agentProgress?.phase == phase { return }
+            try await Task.sleep(nanoseconds: 10_000_000)
+        }
+        XCTFail("Agent progress never reached \(phase)")
     }
 }
