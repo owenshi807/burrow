@@ -136,11 +136,17 @@ final class CleanupPlanStore: ObservableObject {
         revision = 1
         userOverrides = []
         currentAgentRunId = nil
-        selection = CleanSelection(list: list, locked: locked)
+        // Paths are the identity shared by selection, authorization and the
+        // Agent. The scanner has emitted duplicate paths in production, so
+        // canonicalize here too: callers can construct a CleanList directly
+        // without passing through the text parser.
+        let canonicalList = list.deduplicatedByPath()
+        selection = CleanSelection(list: canonicalList, locked: locked)
 
-        let snapshotItems = Dictionary(uniqueKeysWithValues:
-            snapshot.items.map { ($0.identity.path, $0.identity) })
-        candidates = list.categories.flatMap { category in
+        let snapshotItems = Dictionary(
+            snapshot.items.map { ($0.identity.path, $0.identity) },
+            uniquingKeysWith: { first, _ in first })
+        candidates = canonicalList.categories.flatMap { category in
             category.items.map { item in
                 let identityToken = snapshotItems[item.path]?.shellStatToken ?? "refused"
                 let id = Self.candidateId(planId: planId, path: item.path,
@@ -153,8 +159,9 @@ final class CleanupPlanStore: ObservableObject {
                     locked: locked[item.path] != nil)
             }
         }
-        pathToCandidateId = Dictionary(uniqueKeysWithValues: candidates.map { ($0.path, $0.id) })
-        recommendations = Dictionary(uniqueKeysWithValues: candidates.map { candidate in
+        pathToCandidateId = Dictionary(candidates.map { ($0.path, $0.id) },
+                                       uniquingKeysWith: { first, _ in first })
+        recommendations = Dictionary(candidates.map { candidate in
             let disposition: CleanupRecommendationDisposition = candidate.locked ? .keep : .delete
             let reason = candidate.locked
                 ? Self.lockReasonText(locked[candidate.path])
@@ -163,7 +170,7 @@ final class CleanupPlanStore: ObservableObject {
                 origin: .scanner, disposition: disposition, reason: reason,
                 consequence: CleanReviewView.consequence(for: candidate.category),
                 confidence: nil, evidence: [], agentRunId: nil))
-        })
+        }, uniquingKeysWith: { first, _ in first })
         selectedCandidateId = candidates.first?.id
         agentState = hasAgentConsent ? .idle : .consentRequired
     }

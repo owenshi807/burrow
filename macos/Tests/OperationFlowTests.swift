@@ -263,7 +263,8 @@ final class OperationFlowTests: XCTestCase {
         let op = try XCTUnwrap(center.ops.first)
         XCTAssertTrue(op.notifiesOnEnd)
         XCTAssertEqual(op.phase, .done)
-        XCTAssertEqual(op.detail, "Cleaned 383.8MB · 372 items",
+        XCTAssertEqual(op.detail,
+                       TaskSummary(space: "383.8MB", items: "372", categories: "1").completionLine,
                        "final detail is the parsed summary, not the last raw line")
     }
 

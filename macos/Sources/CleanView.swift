@@ -50,9 +50,10 @@ struct CleanView: View {
     @State private var reviewList: CleanList?
     @State private var reviewSnapshot: CleanupSnapshot?
     @State private var reviewLocked: [String: CleanSelection.LockReason] = [:]
-    /// When the dry-run finished — the review goes stale after a few
-    /// minutes (TOCTOU: caches appear between preview and run).
-    @State private var scanFinishedAt: Date?
+    /// The bundled preview planner can spend minutes without emitting an
+    /// item. Keep an elapsed clock so that silence never looks like a frozen
+    /// app even while the byte count remains zero.
+    @State private var scanStartedAt: Date?
     /// Trash-mode result line, shown as a done banner.
     @State private var trashResult: String?
     @State private var fdaGranted = Privacy.hasFullDiskAccess()
@@ -114,8 +115,8 @@ struct CleanView: View {
         .onReceive(NotificationCenter.default.publisher(for: NSApplication.didBecomeActiveNotification)) { _ in
             fdaGranted = Privacy.hasFullDiskAccess()
         }
-        .onChange(of: dryRunFinished) { _, finished in
-            if finished { scanFinishedAt = Date() }
+        .onChange(of: dryRunRunning) { _, running in
+            if running { scanStartedAt = Date() }
         }
         .overlay(alignment: .bottom) {
             if let result = trashResult {
@@ -211,12 +212,23 @@ struct CleanView: View {
                     : String(format: NSLocalizedString("Scanning, %@ found so far", comment: ""), Fmt.bytes(bytes)))
 
                 if !final {
-                    HStack(spacing: 8) {
-                        ProgressView().controlSize(.small).tint(Tool.clean.accent)
-                        Text("Scanning your Mac…").font(Brand.mono(11)).foregroundStyle(Brand.textSecondary)
-                        Button { dryFlow.cancel() } label: {
-                            Text("Stop").font(Brand.mono(11)).foregroundStyle(Brand.red)
-                        }.buttonStyle(.plain)
+                    TimelineView(.periodic(from: .now, by: 1)) { context in
+                        VStack(spacing: 6) {
+                            HStack(spacing: 8) {
+                                ProgressView().controlSize(.small).tint(Tool.clean.accent)
+                                Text(String(
+                                    format: NSLocalizedString("Scanning your Mac… · %@ elapsed", comment: "cleanup scan elapsed time"),
+                                    scanElapsedText(at: context.date)))
+                                    .font(Brand.mono(11)).foregroundStyle(Brand.textSecondary)
+                                Button { dryFlow.cancel() } label: {
+                                    Text("Stop").font(Brand.mono(11)).foregroundStyle(Brand.red)
+                                }.buttonStyle(.plain)
+                            }
+                            if scanElapsedSeconds(at: context.date) >= 30 {
+                                Text("The engine is still scanning. This read-only preview can take several minutes on large caches.")
+                                    .font(Brand.mono(10)).foregroundStyle(Brand.textTertiary)
+                            }
+                        }
                     }
                 } else if case .finished(.cancelled) = dryFlow.state {
                     Text("Stopped before the end — results are partial.")
@@ -268,6 +280,20 @@ struct CleanView: View {
         return false
     }
 
+    private var dryRunRunning: Bool {
+        if case .running = dryFlow.state { return true }
+        return false
+    }
+
+    private func scanElapsedSeconds(at date: Date) -> Int {
+        max(0, Int(date.timeIntervalSince(scanStartedAt ?? date)))
+    }
+
+    private func scanElapsedText(at date: Date) -> String {
+        let seconds = scanElapsedSeconds(at: date)
+        return String(format: "%d:%02d", seconds / 60, seconds % 60)
+    }
+
     private func heroNumber(_ bytes: Int64, final: Bool) -> String {
         final ? String(format: NSLocalizedString("%@ found", comment: "clean result hero"), Fmt.bytes(bytes))
               : Fmt.bytes(bytes)
@@ -316,15 +342,15 @@ struct CleanView: View {
         screen = .review
     }
 
-    /// Confirm from the review pill. Stale previews (TOCTOU window —
-    /// caches that appeared after the scan would be cleaned unreviewed)
-    /// force a rescan instead of a run.
+    /// Confirm from the review pill. The snapshot is the authoritative review
+    /// session: it pins exactly the selected cleanup roots and revalidates
+    /// their identities at every execution boundary.
     private func confirmClean(_ selection: CleanSelection) {
         guard let snapshot = reviewSnapshot else { return }
-        if let finished = scanFinishedAt, Date().timeIntervalSince(finished) > Self.reviewFreshSeconds {
+        if Date() > snapshot.expiresAt {
             let alert = NSAlert()
             alert.messageText = NSLocalizedString("This preview is stale", comment: "")
-            alert.informativeText = NSLocalizedString("The scan is more than a few minutes old — caches that appeared since wouldn't have been reviewed. Rescan to get current numbers, then clean.", comment: "")
+            alert.informativeText = NSLocalizedString("This review session has expired. Rescan to create a new path-verified cleanup plan, then clean.", comment: "")
             alert.addButton(withTitle: NSLocalizedString("Rescan", comment: ""))
             alert.addButton(withTitle: NSLocalizedString("Cancel", comment: ""))
             if alert.runModalQuiet() == .alertFirstButtonReturn { screen = .hero; startDry() }
@@ -336,11 +362,6 @@ struct CleanView: View {
             runRealClean(selection, snapshot: snapshot)
         }
     }
-
-    /// How long a preview stays trustworthy. Tight on purpose: the
-    /// whitelist session excludes, it doesn't include, so anything new
-    /// since the scan would be cleaned without review.
-    static let reviewFreshSeconds: TimeInterval = 300
 
     // MARK: - The real run (permanent mode)
 
@@ -363,7 +384,6 @@ struct CleanView: View {
         }
         let plan = preparation.plan
         let executablePaths = Set(plan.items.map(\.identity.path))
-        screen = .hero
         // `find -delete` succeeds SILENTLY — it writes nothing at all — so
         // parsing its output produced an empty report: no items, no bytes, no
         // done-banner. The reviewed clean deleted exactly what was ticked and
@@ -379,6 +399,20 @@ struct CleanView: View {
         let changed = preparation.skippedChangedPaths
         let cleanedBytes = cleaned.flatMap(\.1).reduce(Int64(0)) { $0 + $1.sizeBytes }
         let cleanedCount = cleaned.reduce(0) { $0 + $1.1.count }
+        let confirmation = NSAlert()
+        confirmation.messageText = String(
+            format: NSLocalizedString("Permanently clean %d items (%@)?", comment: "final permanent cleanup confirmation"),
+            cleanedCount,
+            Fmt.bytes(cleanedBytes))
+        confirmation.informativeText = NSLocalizedString(
+            "The selected cache files will be deleted immediately and cannot be recovered. Burrow will clean only the reviewed paths shown in this plan.",
+            comment: "final permanent cleanup warning")
+        confirmation.alertStyle = .critical
+        confirmation.addButton(withTitle: NSLocalizedString("Permanently clean", comment: "final permanent cleanup action"))
+        confirmation.addButton(withTitle: NSLocalizedString("Cancel", comment: ""))
+        guard confirmation.runModalQuiet() == .alertFirstButtonReturn else { return }
+
+        screen = .hero
         realFlow.start(ToolOperation(
             label: NSLocalizedString("Cleaning reviewed caches", comment: ""),
             executable: .path("/usr/bin/find"), arguments: [], elevated: true,

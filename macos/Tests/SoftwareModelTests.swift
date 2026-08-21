@@ -502,12 +502,12 @@ final class SoftwareUninstallModelTests: XCTestCase {
 
     private var trashSentence: String {
         NSLocalizedString("These move to the Trash — the app itself and the support files it keeps in your Library (containers, caches, preferences, saved state). You can put them back:\n\n%@", comment: "")
-            .components(separatedBy: ":\n\n").first ?? ""
+            .components(separatedBy: "\n\n").first ?? ""
     }
 
     private var keptSentence: String {
         NSLocalizedString("These stay installed — only the reviewed support files move to the Trash, and you can put them back:\n\n%@", comment: "")
-            .components(separatedBy: ":\n\n").first ?? ""
+            .components(separatedBy: "\n\n").first ?? ""
     }
 
     /// The names a given sentence governs. `confirmCopy` formats every block as
@@ -517,7 +517,10 @@ final class SoftwareUninstallModelTests: XCTestCase {
     /// block lists Steam" comes out false however right the copy is. Anchor on the sentence's own
     /// separator instead and take the single paragraph it introduces.
     private func listed(under sentence: String, in body: String) -> String {
-        guard let intro = body.range(of: sentence + ":\n\n") else { return "" }
+        // Keep the localized punctuation in `sentence`: Simplified and
+        // Traditional Chinese use a full-width colon, so reconstructing an
+        // English `:\n\n` separator makes a correct sheet look absent.
+        guard let intro = body.range(of: sentence + "\n\n") else { return "" }
         return body[intro.upperBound...].components(separatedBy: "\n\n").first ?? ""
     }
 

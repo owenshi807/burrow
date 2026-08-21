@@ -85,6 +85,8 @@
 "to free" = "可释放";
 "· %@ items · %@ categories" = "· %@ 项 · %@ 类";
 "Scanning your Mac…" = "正在扫描你的 Mac…";
+"Scanning your Mac… · %@ elapsed" = "正在扫描你的 Mac… · 已用时 %@";
+"The engine is still scanning. This read-only preview can take several minutes on large caches." = "扫描引擎仍在工作。缓存较大时，这项只读预览可能需要几分钟。";
 "Cleaning… don't quit." = "正在清理…请勿退出。";
 "Preview — review, then clean for real." = "预览完成，请检查后再执行清理。";
 "Done — caches cleared." = "完成，缓存已清理。";
@@ -583,7 +585,7 @@
 "Without Full Disk Access, macOS hides most app and container caches from Burrow. Grant it once for full scans — or rerun this scan with administrator rights (one password)." = "没有完全磁盘访问权限时，macOS 会向 Burrow 隐藏大多数应用与容器缓存。授予一次即可完整扫描 —— 或以管理员权限重新扫描（输入一次密码）。";
 "Scan with admin" = "以管理员权限扫描";
 "This preview is stale" = "此预览已过期";
-"The scan is more than a few minutes old — caches that appeared since wouldn't have been reviewed. Rescan to get current numbers, then clean." = "扫描已是几分钟前的结果 —— 其后新出现的缓存未经审核。请重新扫描获取最新数据，再进行清理。";
+"This review session has expired. Rescan to create a new path-verified cleanup plan, then clean." = "本次审查会话已过期。请重新扫描，创建一份经过路径校验的新清理方案后再清理。";
 "Couldn't protect deselected items" = "无法保护已取消勾选的项目";
 "Writing the whitelist failed (%@), so the engine would clean everything it found. Nothing was cleaned." = "写入白名单失败（%@），引擎将会清理它找到的所有内容。因此什么都没有清理。";
 "Move %d items (%@) to the Trash?" = "将 %1$d 个项目（%2$@）移到废纸篓？";
@@ -918,3 +920,6 @@
 "Your choice" = "你的选择";
 "You chose to include this candidate in the current plan." = "你已选择将此候选项纳入当前方案。";
 "You chose to keep this candidate in the current plan." = "你已选择在当前方案中保留此候选项。";
+"Permanently clean %d items (%@)?" = "永久清理 %1$d 项（%2$@）？";
+"The selected cache files will be deleted immediately and cannot be recovered. Burrow will clean only the reviewed paths shown in this plan." = "选中的缓存文件将被立即删除，且无法恢复。Burrow 只会清理此方案中已经审阅的路径。";
+"Permanently clean" = "永久清理";

@@ -29,7 +29,12 @@ struct CleanReviewView: View {
             GeometryReader { proxy in
                 HStack(spacing: 0) {
                     planColumn
-                    if proxy.size.width >= 920 {
+                    // The default window leaves about 850 pt after the rail.
+                    // At the old 920 pt breakpoint the evidence inspector was
+                    // absent in the normal window, so selecting a row appeared
+                    // to do nothing. 760 pt still leaves a usable plan column
+                    // beside the inspector.
+                    if proxy.size.width >= 760 {
                         Rectangle().fill(Brand.hairline).frame(width: 1)
                         inspector.frame(width: min(360, max(300, proxy.size.width * 0.29)))
                     }
@@ -43,7 +48,11 @@ struct CleanReviewView: View {
 
     private var planColumn: some View {
         ScrollView {
-            LazyVStack(spacing: 12) {
+            // Keep this eager. Updating one candidate while a section was
+            // expanded could leave SwiftUI's LazyVStack placement graph in a
+            // 100% CPU relayout loop on macOS 26. A cleanup review is bounded
+            // to a small scanner result, so eager layout is cheap and stable.
+            VStack(spacing: 12) {
                 agentDisclosure
                 ForEach(CleanupRecommendationDisposition.allCases, id: \.rawValue) { disposition in
                     let sections = planStore.sections.filter { $0.disposition == disposition }

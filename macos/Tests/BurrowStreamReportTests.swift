@@ -21,8 +21,11 @@ final class BurrowStreamReportTests: XCTestCase {
         XCTAssertEqual(report.groups.first?.items.count, 1)
         XCTAssertEqual(report.summary?.space, "383.8MB")
         XCTAssertEqual(report.summary?.items, "372")
-        // No freeChange on a preview → "Cleaned", not "Freed".
-        XCTAssertEqual(report.summary?.completionLine, "Cleaned 383.8MB · 372 items")
+        // No freeChange on a preview → tracked cleanup, not measured freed
+        // space. The surrounding words are localized by the user's locale.
+        XCTAssertEqual(report.summary?.freeChange, "")
+        XCTAssertTrue(report.summary?.completionLine.contains("383.8MB") == true)
+        XCTAssertTrue(report.summary?.completionLine.contains("372") == true)
     }
 
     func testCleanLive_yieldsFreedSummary() {
@@ -37,7 +40,8 @@ final class BurrowStreamReportTests: XCTestCase {
         // `freed_human` is the PLANNER's queued-for-removal tally (summed before deletion), not a
         // measured before/after disk delta — it belongs in `space` ("Cleaned"), not `freeChange`
         // ("Freed", reserved for an actual "Free space change:" reading the engine doesn't emit).
-        XCTAssertEqual(report.summary?.completionLine, "Cleaned 2.0KB · 1 items")
+        XCTAssertTrue(report.summary?.completionLine.contains("2.0KB") == true)
+        XCTAssertTrue(report.summary?.completionLine.contains("1") == true)
         XCTAssertEqual(report.summary?.freeChange, "", "freeChange is reserved for a real free-space-change reading")
     }
 

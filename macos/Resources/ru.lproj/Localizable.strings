@@ -85,6 +85,8 @@
 "to free" = "к освобождению";
 "· %@ items · %@ categories" = "· %@ элементов · %@ категорий";
 "Scanning your Mac…" = "Сканирование вашего Mac…";
+"Scanning your Mac… · %@ elapsed" = "Сканирование вашего Mac… · прошло %@";
+"The engine is still scanning. This read-only preview can take several minutes on large caches." = "Движок всё ещё сканирует. Для больших кэшей этот предварительный просмотр только для чтения может занять несколько минут.";
 "Cleaning… don't quit." = "Очистка… не закрывайте приложение.";
 "Preview — review, then clean for real." = "Предпросмотр — проверьте, затем выполните очистку.";
 "Done — caches cleared." = "Готово — кэши очищены.";
@@ -583,7 +585,7 @@
 "Without Full Disk Access, macOS hides most app and container caches from Burrow. Grant it once for full scans — or rerun this scan with administrator rights (one password)." = "Без полного доступа к диску macOS скрывает от Burrow большинство кэшей приложений и контейнеров. Предоставьте его один раз для полного сканирования — или перезапустите сканирование с правами администратора (один пароль).";
 "Scan with admin" = "Сканировать с правами администратора";
 "This preview is stale" = "Этот предпросмотр устарел";
-"The scan is more than a few minutes old — caches that appeared since wouldn't have been reviewed. Rescan to get current numbers, then clean." = "Сканированию уже несколько минут — кэши, появившиеся с тех пор, не были проверены. Пересканируйте, чтобы получить актуальные цифры, затем очищайте.";
+"This review session has expired. Rescan to create a new path-verified cleanup plan, then clean." = "Срок сеанса проверки истёк. Выполните повторное сканирование, чтобы создать новый план очистки с проверенными путями.";
 "Couldn't protect deselected items" = "Не удалось защитить снятые с выбора элементы";
 "Writing the whitelist failed (%@), so the engine would clean everything it found. Nothing was cleaned." = "Не удалось записать белый список (%@), поэтому движок очистил бы всё, что найдёт. Ничего не было очищено.";
 "Move %d items (%@) to the Trash?" = "Переместить элементы (%1$d, %2$@) в Корзину?";
@@ -918,3 +920,6 @@
 "Your choice" = "Ваш выбор";
 "You chose to include this candidate in the current plan." = "Вы включили этот кандидат в текущий план.";
 "You chose to keep this candidate in the current plan." = "Вы решили оставить этот кандидат в текущем плане.";
+"Permanently clean %d items (%@)?" = "Удалить безвозвратно: %1$d объектов (%2$@)?";
+"The selected cache files will be deleted immediately and cannot be recovered. Burrow will clean only the reviewed paths shown in this plan." = "Выбранные файлы кэша будут удалены немедленно без возможности восстановления. Burrow очистит только проверенные пути из этого плана.";
+"Permanently clean" = "Удалить безвозвратно";

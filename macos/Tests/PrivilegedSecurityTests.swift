@@ -300,8 +300,10 @@ final class CleanupAuthorizationTests: XCTestCase {
         let old = Date(timeIntervalSince1970: 1_000)
         let snapshot = try CleanupSnapshot.capture(list: list([item.path]),
                                                    approvedRootURLs: [root], now: old)
+        XCTAssertNoThrow(try snapshot.plan(selectedPaths: [item.path],
+                                           now: old.addingTimeInterval(899)))
         XCTAssertThrowsError(try snapshot.plan(selectedPaths: [item.path],
-                                               now: old.addingTimeInterval(301)))
+                                               now: old.addingTimeInterval(901)))
 
         let moved = root.appendingPathComponent("moved")
         try FileManager.default.moveItem(at: item, to: moved)

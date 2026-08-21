@@ -225,7 +225,13 @@ struct CleanupSnapshot: Sendable, Equatable {
         }
     }
 
-    static let lifetime: TimeInterval = 300
+    /// A bounded review session, long enough for an Agent to inspect a large
+    /// scan before the user reaches confirmation. Safety does not depend on
+    /// the preview being only a few minutes old: every selected root's pinned
+    /// identity is checked again while preparing the plan, again immediately
+    /// before launch, and once more after the administrator dialog. The
+    /// expiry bounds how long that path-scoped authorization may be reused.
+    static let lifetime: TimeInterval = 15 * 60
 
     let id: UUID
     let createdAt: Date

@@ -94,6 +94,33 @@ final class CleanupAgentPlanTests: XCTestCase {
         XCTAssertEqual(store.recommendation(for: locked.id).disposition, .keep)
     }
 
+    func testLoadDeduplicatesOnePathReportedByMultipleScannerCategories() throws {
+        let shared = root.appendingPathComponent("shared-cache")
+        try FileManager.default.createDirectory(at: shared, withIntermediateDirectories: false)
+        let duplicateList = CleanList(
+            categories: [
+                .init(name: "App caches", items: [
+                    .init(path: shared.path, sizeBytes: 2_000, sizeText: "2KB", itemCount: 2),
+                ]),
+                .init(name: "Application Support", items: [
+                    .init(path: shared.path, sizeBytes: 2_000, sizeText: "2KB", itemCount: 2),
+                ]),
+            ], summaryTotalText: "2KB", summaryItemCount: 2)
+        let snapshot = try CleanupSnapshot.capture(list: duplicateList, approvedRootURLs: [root])
+        let store = CleanupPlanStore(analyzer: FakeCleanupAnalyzer(delay: 0) { _ in
+            CleanupAgentAnalysis(summary: "", recommendations: [])
+        })
+
+        store.load(list: duplicateList, snapshot: snapshot, locked: [:], hasAgentConsent: false)
+
+        XCTAssertEqual(store.candidates.count, 1)
+        XCTAssertEqual(store.candidates.first?.path, shared.path)
+        XCTAssertEqual(store.sections.flatMap(\.candidates).count, 1)
+        XCTAssertEqual(store.totalCount, 1)
+        XCTAssertEqual(store.selectedCount, 1)
+        XCTAssertEqual(store.selectedBytes, 2_000)
+    }
+
     func testPartialUnknownAndDuplicateRecommendationsAreIgnoredAndDegradeShortcut() async throws {
         let fixture = try makeFixture()
         let analyzer = FakeCleanupAnalyzer(delay: 0) { input in
@@ -119,7 +146,9 @@ final class CleanupAgentPlanTests: XCTestCase {
         guard case .degraded(_, let reason) = store.agentState else {
             return XCTFail("partial analysis must be visibly degraded")
         }
-        XCTAssertTrue(reason.contains("1 of 2"))
+        XCTAssertFalse(reason.isEmpty)
+        XCTAssertTrue(reason.contains("1"))
+        XCTAssertTrue(reason.contains("2"))
     }
 
     func testLiveCodexReturnsSchemaValidCandidateJudgmentsWhenEnabled() async throws {

@@ -37,7 +37,7 @@ final class DiskScannerTests: XCTestCase {
         ).errorDescription)
         XCTAssertTrue(msg.contains(MoleCLI.minimumAnalyzeJSONVersion))
         XCTAssertTrue(msg.contains("1.28.1"))
-        XCTAssertTrue(msg.contains("Update external engine"))
+        XCTAssertTrue(msg.contains(NSLocalizedString("Update external engine", comment: "")))
     }
 
     func testTooOldError_readableWithUnknownVersion() throws {

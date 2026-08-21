@@ -56,6 +56,22 @@ struct CleanList: Equatable {
         return parsed.categories.isEmpty ? nil : parsed
     }
 
+    /// The legacy scanner can report the same physical path more than once
+    /// (observed in Applications for Podcasts tmp data). Paths are the
+    /// selection and authorization identity, so one path must produce exactly
+    /// one review candidate. Preserve the scanner's first classification and
+    /// discard later duplicates without reordering the remaining entries.
+    func deduplicatedByPath() -> CleanList {
+        var seen = Set<String>()
+        let uniqueCategories = categories.compactMap { category -> Category? in
+            let items = category.items.filter { seen.insert($0.path).inserted }
+            return items.isEmpty ? nil : Category(name: category.name, items: items)
+        }
+        return CleanList(categories: uniqueCategories,
+                         summaryTotalText: summaryTotalText,
+                         summaryItemCount: summaryItemCount)
+    }
+
     static func parse(_ text: String) -> CleanList {
         var categories: [Category] = []
         var current: Category?
@@ -105,6 +121,7 @@ struct CleanList: Equatable {
         return CleanList(categories: categories,
                          summaryTotalText: summaryTotal,
                          summaryItemCount: summaryItems)
+            .deduplicatedByPath()
     }
 
     /// "2.24GB" → bytes (1024-based, matching the engine's humanized sizes

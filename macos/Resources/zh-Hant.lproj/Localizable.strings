@@ -85,6 +85,8 @@
 "to free" = "可釋放";
 "· %@ items · %@ categories" = "· %@ 個項目 · %@ 個類別";
 "Scanning your Mac…" = "正在掃描你的 Mac…";
+"Scanning your Mac… · %@ elapsed" = "正在掃描你的 Mac… · 已用時 %@";
+"The engine is still scanning. This read-only preview can take several minutes on large caches." = "掃描引擎仍在工作。快取較大時，這項唯讀預覽可能需要幾分鐘。";
 "Cleaning… don't quit." = "正在清理…請勿結束。";
 "Preview — review, then clean for real." = "預覽完成 — 請檢查後再正式清理。";
 "Done — caches cleared." = "完成 — 快取已清理。";
@@ -568,7 +570,7 @@
 "Without Full Disk Access, macOS hides most app and container caches from Burrow. Grant it once for full scans — or rerun this scan with administrator rights (one password)." = "沒有完整磁碟取用權限時，macOS 會對 Burrow 隱藏大多數應用程式與容器快取。授予一次即可完整掃描 —— 或以管理員權限重新掃描（輸入一次密碼）。";
 "Scan with admin" = "以管理員權限掃描";
 "This preview is stale" = "此預覽已過期";
-"The scan is more than a few minutes old — caches that appeared since wouldn't have been reviewed. Rescan to get current numbers, then clean." = "掃描已是幾分鐘前的結果 —— 其後新出現的快取未經審核。請重新掃描取得最新資料，再進行清理。";
+"This review session has expired. Rescan to create a new path-verified cleanup plan, then clean." = "本次審查工作階段已過期。請重新掃描，建立一份經過路徑驗證的新清理方案後再清理。";
 "Couldn't protect deselected items" = "無法保護已取消勾選的項目";
 "Writing the whitelist failed (%@), so the engine would clean everything it found. Nothing was cleaned." = "寫入白名單失敗（%@），引擎將會清理它找到的所有內容。因此什麼都沒有清理。";
 "Move %d items (%@) to the Trash?" = "將 %1$d 個項目（%2$@）移到垃圾桶？";
@@ -903,3 +905,6 @@
 "Your choice" = "你的選擇";
 "You chose to include this candidate in the current plan." = "你已選擇將此候選項目納入目前方案。";
 "You chose to keep this candidate in the current plan." = "你已選擇在目前方案中保留此候選項目。";
+"Permanently clean %d items (%@)?" = "永久清理 %1$d 個項目（%2$@）？";
+"The selected cache files will be deleted immediately and cannot be recovered. Burrow will clean only the reviewed paths shown in this plan." = "選取的快取檔案將立即刪除，且無法復原。Burrow 只會清理此方案中已審閱的路徑。";
+"Permanently clean" = "永久清理";

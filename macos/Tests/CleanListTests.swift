@@ -90,6 +90,23 @@ final class CleanListTests: XCTestCase {
         XCTAssertTrue(list.categories.isEmpty)
     }
 
+    func testParse_keepsOnlyFirstOccurrenceOfDuplicatePath() {
+        let list = CleanList.parse("""
+        === Applications ===
+        /Users/henry/Library/Containers/com.apple.podcasts/Data/tmp  # 8MB, 2 items
+        /Users/henry/Library/Containers/com.apple.podcasts/Data/tmp  # 8MB, 2 items
+        === Application Support ===
+        /Users/henry/Library/Containers/com.apple.podcasts/Data/tmp  # 8MB, 2 items
+        /Users/henry/Library/Caches/unique  # 1MB
+        """)
+
+        XCTAssertEqual(list.categories.flatMap(\.items).map(\.path), [
+            "/Users/henry/Library/Containers/com.apple.podcasts/Data/tmp",
+            "/Users/henry/Library/Caches/unique",
+        ])
+        XCTAssertEqual(list.categories.map(\.name), ["Applications", "Application Support"])
+    }
+
     func testParseSize_units() {
         XCTAssertEqual(CleanList.parseSize("4KB"), 4 * 1024)
         XCTAssertEqual(CleanList.parseSize("978KB"), 978 * 1024)
