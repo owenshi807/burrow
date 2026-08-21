@@ -51,10 +51,13 @@ the complete app is then re-signed and notarized as one distribution.
 
 ## Original app icon
 
-The Moon Cheese/Burrow app icon is original generated artwork based on the
-public “Modern Isometric 3D Icons — High-Fidelity” textual style prompt. The
-Thiings Moon Cheese artwork was neither used as a generation reference nor
-included in this repository or build.
+The Burrow caretaker monkey is original generated artwork selected through a
+multi-round mascot exploration. Its small teal cleaning brush communicates the
+cleanup role while the character remains the primary identity. The production
+asset preserves the selected warm-white scene inside a macOS rounded-square
+mask so fur and tail edges stay clean on both light and dark desktops.
+
+No third-party image asset is included in this repository or build.
 
 Style prompt source:
 https://gist.github.com/tanishqsh/ad7ef969cef9d7f3a5a688de49354084
