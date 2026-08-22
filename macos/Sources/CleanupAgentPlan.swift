@@ -24,10 +24,35 @@ enum CleanupRecommendationOrigin: String, Codable, Sendable {
     case user
 }
 
+enum CleanupAgentEvidenceBasis: String, Codable, Sendable {
+    /// Directly inspected filesystem, process, package, configuration, or
+    /// application metadata.
+    case observation
+    /// A relationship established from inspected facts: owner, consumer,
+    /// active reference, version lineage, duplicate, or replacement.
+    case relationship
+    /// A hypothesis from naming, location, age, size, or convention. Useful
+    /// for deciding what to inspect next, never enough by itself to delete.
+    case inference
+    /// A relevant check could not be completed. This uncertainty must remain
+    /// visible instead of being converted into confidence.
+    case gap
+}
+
 struct CleanupAgentEvidence: Codable, Equatable, Sendable, Identifiable {
+    let basis: CleanupAgentEvidenceBasis
     let label: String
     let detail: String
-    var id: String { label + "\u{1f}" + detail }
+
+    init(basis: CleanupAgentEvidenceBasis = .observation,
+         label: String,
+         detail: String) {
+        self.basis = basis
+        self.label = label
+        self.detail = detail
+    }
+
+    var id: String { basis.rawValue + "\u{1f}" + label + "\u{1f}" + detail }
 }
 
 struct CleanupAgentRecommendation: Codable, Equatable, Sendable {
@@ -419,7 +444,10 @@ final class CleanupPlanStore: ObservableObject {
             guard known.contains(proposal.candidateId), seen.insert(proposal.candidateId).inserted,
                   !proposal.reason.trimmingCharacters(in: .whitespacesAndNewlines).isEmpty,
                   !proposal.consequence.trimmingCharacters(in: .whitespacesAndNewlines).isEmpty,
-                  !proposal.evidence.isEmpty else { continue }
+                  !proposal.evidence.isEmpty,
+                  proposal.disposition == .keep || proposal.evidence.contains(where: {
+                      $0.basis == .observation || $0.basis == .relationship
+                  }) else { continue }
             let candidate = candidates.first { $0.id == proposal.candidateId }
             let policy: (disposition: CleanupRecommendationDisposition, reason: String?, consequence: String?) = candidate.map {
                 policyDisposition(proposed: proposal.disposition, candidate: $0)
@@ -533,19 +561,6 @@ final class CleanupPlanStore: ObservableObject {
             )
         }
 
-        // Large local models are technically rebuildable but carry offline,
-        // bandwidth, and deliberate-download intent. Codex may identify them
-        // as zombies; the user makes the final inclusion decision.
-        let lowerPath = candidate.path.lowercased()
-        let modelSignals = ["huggingface", "whisper", "ollama", "qwen", "/models/"]
-        if proposed == .delete, candidate.sizeBytes >= 512 * 1_024 * 1_024,
-           modelSignals.contains(where: { lowerPath.contains($0) }) {
-            return (
-                .humanIntentRequired,
-                NSLocalizedString("Codex identified this as an unused local model cache. Burrow leaves large offline models for you to include or keep.", comment: "large model cleanup policy"),
-                NSLocalizedString("Cleaning it frees substantial space, but using that model again requires downloading or rebuilding it.", comment: "large model cleanup consequence")
-            )
-        }
         return (proposed, nil, nil)
     }
 

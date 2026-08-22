@@ -227,36 +227,128 @@ final class CleanupAgentPlanTests: XCTestCase {
                        "authoritative overview arithmetic is derived, never copied from model prose")
     }
 
-    func testLargeLocalModelRequiresHumanDecisionEvenWhenAgentSuggestsDelete() async throws {
-        let model = root.appendingPathComponent("huggingface-whisper-model")
-        try FileManager.default.createDirectory(at: model, withIntermediateDirectories: false)
+    func testSizeTypeAndPathDoNotOverrideEvidenceBackedAgentJudgment() async throws {
+        let asset = root.appendingPathComponent("large-offline-asset/objects/current")
+        try FileManager.default.createDirectory(at: asset, withIntermediateDirectories: true)
         let list = CleanList(categories: [.init(name: "Developer tools", items: [
-            .init(path: model.path, sizeBytes: 3_860_000_000, sizeText: "3.86GB", itemCount: 5),
-        ])], summaryTotalText: "3.86GB", summaryItemCount: 5)
+            .init(path: asset.path, sizeBytes: 5_000_000_000, sizeText: "5GB", itemCount: 5),
+        ])], summaryTotalText: "5GB", summaryItemCount: 5)
         let snapshot = try CleanupSnapshot.capture(list: list, approvedRootURLs: [root])
         let analyzer = FakeCleanupAnalyzer(delay: 0) { input in
-            CleanupAgentAnalysis(summary: "Unused model cache.", recommendations: [
+            CleanupAgentAnalysis(summary: "Unused recoverable asset.", recommendations: [
                 .init(candidateId: input.candidates[0].candidateId, disposition: .delete,
-                      reason: "No active consumer found.", consequence: "Downloads again when needed.",
+                      reason: "The installed owner points to a different current asset.",
+                      consequence: "This retired asset can be downloaded again when needed.",
                       confidence: 0.95,
-                      evidence: [.init(label: "Consumer check", detail: "No installed reference found")]),
+                      evidence: [.init(
+                        basis: .relationship,
+                        label: "Current version reference",
+                        detail: "The owner's inspected manifest identifies another asset as current."
+                      )]),
             ])
         }
         let store = CleanupPlanStore(analyzer: analyzer)
         store.load(list: list, snapshot: snapshot, locked: [:], hasAgentConsent: true)
 
         let baseline = try XCTUnwrap(store.candidates.first)
-        XCTAssertEqual(store.recommendation(for: baseline.id).disposition, .humanIntentRequired,
-                       "large-model policy applies before Codex returns")
-        XCTAssertFalse(store.isSelected(baseline))
+        XCTAssertEqual(store.recommendation(for: baseline.id).disposition, .delete)
+        XCTAssertTrue(store.isSelected(baseline))
+        store.startAgentAnalysis()
+        try await waitUntilReady(store)
+
+        let candidate = try XCTUnwrap(store.candidates.first)
+        XCTAssertEqual(store.recommendation(for: candidate.id).disposition, .delete)
+        XCTAssertTrue(store.isSelected(candidate),
+                      "size, content type and path shape must not override a verified semantic judgment")
+    }
+
+    func testHumanIntentComesFromInvestigatedTradeoffNotAContentHeuristic() async throws {
+        let asset = root.appendingPathComponent("offline-asset")
+        try FileManager.default.createDirectory(at: asset, withIntermediateDirectories: false)
+        let list = CleanList(categories: [.init(name: "Applications", items: [
+            .init(path: asset.path, sizeBytes: 50_000, sizeText: "50KB", itemCount: 1),
+        ])], summaryTotalText: "50KB", summaryItemCount: 1)
+        let snapshot = try CleanupSnapshot.capture(list: list, approvedRootURLs: [root])
+        let analyzer = FakeCleanupAnalyzer(delay: 0) { input in
+            CleanupAgentAnalysis(summary: "One recovery-cost decision remains.", recommendations: [
+                .init(candidateId: input.candidates[0].candidateId,
+                      disposition: .humanIntentRequired,
+                      reason: "The asset is unused, but restoring it requires a paid archive request.",
+                      consequence: "Deleting saves space now; restoring later costs time and money.",
+                      confidence: 0.92,
+                      evidence: [
+                        .init(basis: .relationship, label: "Consumer inventory",
+                              detail: "No current project or installed application references this asset."),
+                        .init(basis: .observation, label: "Recovery policy",
+                              detail: "The inspected account policy requires a paid archive restore."),
+                      ]),
+            ])
+        }
+        let store = CleanupPlanStore(analyzer: analyzer)
+        store.load(list: list, snapshot: snapshot, locked: [:], hasAgentConsent: true)
         store.startAgentAnalysis()
         try await waitUntilReady(store)
 
         let candidate = try XCTUnwrap(store.candidates.first)
         XCTAssertEqual(store.recommendation(for: candidate.id).disposition, .humanIntentRequired)
-        XCTAssertFalse(store.isSelected(candidate), "large offline models never enter the plan without a user choice")
+        XCTAssertFalse(store.isSelected(candidate))
         store.toggleCandidate(candidate.id)
-        XCTAssertTrue(store.isSelected(candidate), "the user can include a verified zombie model")
+        XCTAssertTrue(store.isSelected(candidate), "the user decides the remaining value tradeoff")
+    }
+
+    func testInferenceAloneCannotProduceAnExecutableDeleteRecommendation() async throws {
+        let fixture = try makeFixture()
+        let analyzer = FakeCleanupAnalyzer(delay: 0) { input in
+            CleanupAgentAnalysis(summary: "Filename-only guess.", recommendations: input.candidates.map {
+                .init(candidateId: $0.candidateId, disposition: .delete,
+                      reason: "The name looks obsolete.", consequence: "Unknown.", confidence: 0.8,
+                      evidence: [.init(basis: .inference, label: "Naming convention",
+                                       detail: "The directory name resembles an old build.")])
+            })
+        }
+        let store = CleanupPlanStore(analyzer: analyzer)
+        store.load(list: fixture.list, snapshot: fixture.snapshot, locked: [:], hasAgentConsent: true)
+        let selectedCount = store.selectedCount
+        store.startAgentAnalysis()
+        try await waitUntilFinished(store)
+
+        guard case .degraded = store.agentState else {
+            return XCTFail("unsupported deletion judgments must fail closed")
+        }
+        XCTAssertEqual(store.selectedCount, selectedCount)
+        XCTAssertTrue(store.recommendations.values.allSatisfy { $0.origin == .scanner })
+        XCTAssertFalse(store.canConfirmPlan)
+    }
+
+    func testInvestigationGapCannotBeRelabeledAsHumanIntent() async throws {
+        let fixture = try makeFixture()
+        let analyzer = FakeCleanupAnalyzer(delay: 0) { input in
+            CleanupAgentAnalysis(summary: "Ownership could not be checked.", recommendations: input.candidates.map {
+                .init(candidateId: $0.candidateId, disposition: .humanIntentRequired,
+                      reason: "Ask the user because ownership is unknown.",
+                      consequence: "The deletion consequence is unknown.", confidence: 0.3,
+                      evidence: [.init(basis: .gap, label: "Ownership check",
+                                       detail: "The relevant metadata was unavailable.")])
+            })
+        }
+        let store = CleanupPlanStore(analyzer: analyzer)
+        store.load(list: fixture.list, snapshot: fixture.snapshot, locked: [:], hasAgentConsent: true)
+        store.startAgentAnalysis()
+        try await waitUntilFinished(store)
+
+        guard case .degraded = store.agentState else {
+            return XCTFail("missing investigation must not be delegated to the user")
+        }
+        XCTAssertTrue(store.recommendations.values.allSatisfy { $0.origin == .scanner })
+        XCTAssertFalse(store.canConfirmPlan)
+    }
+
+    func testJudgmentContractIsGeneralAndEvidenceDriven() {
+        let principles = CleanupAgentJudgmentPrinciples.core
+        XCTAssertTrue(principles.contains("No product name, content type, size threshold"))
+        XCTAssertTrue(principles.contains("Absence of evidence is not evidence of absence"))
+        XCTAssertTrue(principles.contains("human_intent_required"))
+        XCTAssertTrue(principles.contains("relationship"))
     }
 
     func testAgentCannotDeleteParentThatContainsIndependentlyJudgedChildren() async throws {
@@ -365,12 +457,12 @@ final class CleanupAgentPlanTests: XCTestCase {
         let input = CleanupAgentAnalysisInput(
             planId: UUID().uuidString, planRevision: 1,
             candidates: [
-                .init(candidateId: "cand-active-model",
-                      path: "/Applications/WaveScribe.app/Contents/Resources/qwen3-speech/models/current",
-                      category: "AI Tools", sizeBytes: 2_000_000_000, itemCount: 12,
-                      runningApp: "WaveScribe", sensitivePathHint: false),
+                .init(candidateId: "cand-active-asset",
+                      path: "/Applications/ExampleEditor.app/Contents/Resources/assets/current",
+                      category: "Applications", sizeBytes: 2_000_000_000, itemCount: 12,
+                      runningApp: "ExampleEditor", sensitivePathHint: false),
                 .init(candidateId: "cand-old-build",
-                      path: "/private/tmp/WaveScribe-old-build/DerivedData",
+                      path: "/private/tmp/ExampleEditor-old-build/DerivedData",
                       category: "Developer tools", sizeBytes: 800_000_000, itemCount: 4000,
                       runningApp: nil, sensitivePathHint: false),
             ])

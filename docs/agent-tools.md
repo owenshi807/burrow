@@ -13,6 +13,10 @@ The server speaks MCP **2026-07-28** — the stateless revision, with `server/di
 and cache hints — and still answers the older `initialize` handshake, so it works with clients
 of either era. See [Protocol surface](#protocol-surface) at the bottom.
 
+Cleanup recommendations follow the provider-neutral
+[Agent Judgment Principles](agent-judgment-principles.md): labels and file types are leads,
+not verdicts; evidence is typed; and probabilistic advice never grants deletion authority.
+
 ## The two kinds of tools
 
 - **Read-only (23)** — observe and diagnose. Always safe; call these proactively whenever a

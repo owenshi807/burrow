@@ -471,7 +471,16 @@ struct CleanReviewView: View {
                                 VStack(alignment: .leading, spacing: 9) {
                                     ForEach(recommendation.evidence) { evidence in
                                         VStack(alignment: .leading, spacing: 2) {
-                                            Text(evidence.label).font(Brand.sans(10, .semibold)).foregroundStyle(Brand.textPrimary)
+                                            HStack(spacing: 6) {
+                                                Text(evidence.basis.title)
+                                                    .font(Brand.mono(8, .semibold))
+                                                    .foregroundStyle(evidence.basis.color)
+                                                    .padding(.horizontal, 5).padding(.vertical, 2)
+                                                    .background(Capsule().fill(evidence.basis.color.opacity(0.12)))
+                                                Text(evidence.label)
+                                                    .font(Brand.sans(10, .semibold))
+                                                    .foregroundStyle(Brand.textPrimary)
+                                            }
                                             Text(evidence.detail).font(Brand.sans(10)).foregroundStyle(Brand.textSecondary)
                                                 .fixedSize(horizontal: false, vertical: true)
                                         }
@@ -713,6 +722,25 @@ private extension CleanupRecommendationDisposition {
         case .delete: return Tool.clean.accent
         case .keep: return Brand.blue
         case .humanIntentRequired: return Brand.amber
+        }
+    }
+}
+
+private extension CleanupAgentEvidenceBasis {
+    var title: String {
+        switch self {
+        case .observation: return NSLocalizedString("Observed", comment: "cleanup Agent evidence basis")
+        case .relationship: return NSLocalizedString("Relationship", comment: "cleanup Agent evidence basis")
+        case .inference: return NSLocalizedString("Inference", comment: "cleanup Agent evidence basis")
+        case .gap: return NSLocalizedString("Not verified", comment: "cleanup Agent evidence basis")
+        }
+    }
+
+    var color: Color {
+        switch self {
+        case .observation, .relationship: return Tool.clean.accent
+        case .inference: return Brand.blue
+        case .gap: return Brand.amber
         }
     }
 }
