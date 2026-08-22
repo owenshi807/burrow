@@ -278,6 +278,38 @@ final class OperationFlowTests: XCTestCase {
         guard case .finished(.failed) = flow.state else { return XCTFail("expected failed") }
     }
 
+    func testAuthCancelledCleanupDoesNotCreateASuccessReceipt() async throws {
+        var parent = FileManager.default.temporaryDirectory
+            .appendingPathComponent("burrow-auth-cancel-cleanup-\(UUID().uuidString)")
+        try FileManager.default.createDirectory(at: parent, withIntermediateDirectories: true)
+        parent = URL(fileURLWithPath: try XCTUnwrap(
+            InvokingUserIdentity.canonicalPath(parent.path)), isDirectory: true)
+        defer { try? FileManager.default.removeItem(at: parent) }
+        let item = parent.appendingPathComponent("reviewed-cache")
+        try FileManager.default.createDirectory(at: item, withIntermediateDirectories: false)
+        let snapshot = try CleanupSnapshot.capture(
+            list: CleanList(categories: [
+                .init(name: "Test", items: [
+                    .init(path: item.path, sizeBytes: 1, sizeText: "1B", itemCount: nil),
+                ]),
+            ], summaryTotalText: "1B", summaryItemCount: 1),
+            approvedRootURLs: [parent])
+
+        let port = FakeProcessPort(script: [
+            .line("BURROW_SKIPPED_CHANGED\t\(item.path)"),
+            .authCancelled,
+        ])
+        let flow = makeFlow(port)
+        var operation = Self.cleanOp(elevated: true)
+        operation.cleanupPlan = try snapshot.plan(selectedPaths: [item.path])
+        flow.start(operation)
+        await settle(flow)
+
+        guard case .finished(.failed) = flow.state else { return XCTFail("expected failed") }
+        XCTAssertNil(flow.report, "cancelled authorization means no cleanup receipt exists")
+        XCTAssertTrue(FileManager.default.fileExists(atPath: item.path))
+    }
+
     func testNonzeroPrivilegedCleanupFailsVisiblyAndNeverCompletesTheHUD() async throws {
         var parent = FileManager.default.temporaryDirectory
             .appendingPathComponent("burrow-operation-flow-cleanup-\(UUID().uuidString)")

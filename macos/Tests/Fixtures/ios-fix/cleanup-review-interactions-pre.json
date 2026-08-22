@@ -1,0 +1,31 @@
+{
+  "screen": "CleanReviewView",
+  "capturedAt": "2026-08-22T10:34:03+08:00",
+  "selection": {
+    "selectedCandidates": 104,
+    "totalCandidates": 121,
+    "selectedCandidatePath": "~/Library/Caches/com.apple.Safari/WebKitCache"
+  },
+  "expandedSection": {
+    "disposition": "delete",
+    "category": "Browsers"
+  },
+  "expectedSectionOrder": [
+    "Browsers",
+    "App caches",
+    "Developer tools",
+    "Applications"
+  ],
+  "observedSectionOrderAfterExpansion": [
+    "App caches",
+    "Developer tools",
+    "Browsers",
+    "Applications"
+  ],
+  "regressions": [
+    "Expanding a section must not change the category order.",
+    "Collapsing a section must not animate unrelated card content or geometry.",
+    "Selecting a candidate row must not move the expanded section card.",
+    "When no candidate is selected for cleanup, the evidence panel must show the plan-wide Codex recommendation rather than an arbitrary candidate."
+  ]
+}

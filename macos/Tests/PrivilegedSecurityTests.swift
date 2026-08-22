@@ -175,6 +175,13 @@ final class CleanupAuthorizationTests: XCTestCase {
         })], summaryTotalText: "1B", summaryItemCount: paths.count)
     }
 
+    func testActiveAppBoundaryDerivesSplitBrowserDisplayName() {
+        let hints = CleanupActiveAppBoundary.identityHints(
+            for: "/Users/u/Library/Application Support/Google/Chrome/Default/CRX-cache")
+        XCTAssertTrue(hints.contains("Google Chrome"), hints.joined(separator: ", "))
+        XCTAssertTrue(hints.contains("Google"))
+    }
+
     func testSnapshotAcceptsCanonicalPathsWithSpacesAndPinsReviewedIdentity() throws {
         let item = root.appendingPathComponent("cache with spaces")
         try FileManager.default.createDirectory(at: item, withIntermediateDirectories: false)
@@ -261,28 +268,21 @@ final class CleanupAuthorizationTests: XCTestCase {
     /// entry still exists when it is reached — and both elevation routes have
     /// to use this order, since the helper path skipping it is what produced
     /// the failure.
-    func testNestedEntriesAreOrderedDeepestFirstSoNoneVanishesBeforeItsTurn() throws {
+    func testOverlappingParentsAreRefusedAndOnlyLeafCandidateIsExecutable() throws {
         let caches = root.appendingPathComponent("Caches")
         let nested = caches.appendingPathComponent("GeoServices")
         let deeper = nested.appendingPathComponent("tiles")
         try FileManager.default.createDirectory(at: deeper, withIntermediateDirectories: true)
 
-        // Parent first in the list, exactly as the engine emits it.
+        // Parent first in the list, exactly as the engine emits it. A parent
+        // cannot coexist with independently judged children in one delete
+        // plan: selecting it would erase kept/unlisted descendants.
         let snapshot = try CleanupSnapshot.capture(
             list: list([caches.path, nested.path, deeper.path]), approvedRootURLs: [root])
-        let plan = try snapshot.plan(
-            selectedPaths: [caches.path, nested.path, deeper.path])
-
-        XCTAssertEqual(plan.orderedReviewedPaths(), [deeper.path, nested.path, caches.path],
-                       "a parent must never be deleted before its own listed children")
-        // The shell the osascript route runs is built from the same order.
-        // Only the item steps matter — the boundary checks ahead of them stat
-        // every root, so searching the whole script finds those first.
-        let shell = plan.irreversibleCleanupShell()
-        let loop = String(shell[try XCTUnwrap(shell.range(of: "failed=0")).lowerBound...])
-        let deepIndex = try XCTUnwrap(loop.range(of: deeper.path)).lowerBound
-        let parentIndex = try XCTUnwrap(loop.range(of: caches.path + "'")).lowerBound
-        XCTAssertLessThan(deepIndex, parentIndex)
+        XCTAssertEqual(Set(snapshot.skipped.map(\.path)), Set([caches.path, nested.path]))
+        XCTAssertThrowsError(try snapshot.plan(selectedPaths: [caches.path]))
+        let plan = try snapshot.plan(selectedPaths: [deeper.path])
+        XCTAssertEqual(plan.orderedReviewedPaths(), [deeper.path])
     }
 
     func testApprovedRootRejectsUnexpectedVolumeIdentity() throws {
@@ -294,16 +294,15 @@ final class CleanupAuthorizationTests: XCTestCase {
         }
     }
 
-    func testPlanFailsClosedWhenStaleOrSymlinkSwapped() throws {
+    func testPlanDoesNotExpireButFailsClosedWhenSymlinkSwapped() throws {
         let item = root.appendingPathComponent("cache")
         try FileManager.default.createDirectory(at: item, withIntermediateDirectories: false)
-        let old = Date(timeIntervalSince1970: 1_000)
+        let old = Date()
         let snapshot = try CleanupSnapshot.capture(list: list([item.path]),
                                                    approvedRootURLs: [root], now: old)
         XCTAssertNoThrow(try snapshot.plan(selectedPaths: [item.path],
-                                           now: old.addingTimeInterval(899)))
-        XCTAssertThrowsError(try snapshot.plan(selectedPaths: [item.path],
-                                               now: old.addingTimeInterval(901)))
+                                           now: old.addingTimeInterval(365 * 24 * 60 * 60)),
+                         "elapsed review time is not a safety failure; identity is revalidated")
 
         let moved = root.appendingPathComponent("moved")
         try FileManager.default.moveItem(at: item, to: moved)
@@ -339,6 +338,45 @@ final class CleanupAuthorizationTests: XCTestCase {
         XCTAssertThrowsError(try snapshot.preparePlan(selectedPaths: [volatile.path])) {
             XCTAssertEqual($0 as? CleanupSnapshot.SnapshotError, .staleOrChanged)
         }
+    }
+
+    func testDescendantMutationAndNewlyActiveAppAreNarrowedPerCandidate() throws {
+        let stable = root.appendingPathComponent("stable")
+        let appCache = root.appendingPathComponent("com.example.Editor/cache")
+        try FileManager.default.createDirectory(at: stable, withIntermediateDirectories: false)
+        try FileManager.default.createDirectory(at: appCache, withIntermediateDirectories: true)
+        let snapshot = try CleanupSnapshot.capture(
+            list: list([stable.path, appCache.path]), approvedRootURLs: [root])
+
+        try Data("new".utf8).write(to: appCache.appendingPathComponent("after-review"))
+        let changed = try snapshot.preparePlan(selectedPaths: [stable.path, appCache.path])
+        XCTAssertEqual(changed.plan.items.map(\.identity.path), [stable.path])
+        XCTAssertEqual(changed.skippedChangedPaths, [appCache.path])
+
+        // A fresh scope can also be narrowed after authentication if its app
+        // becomes active while the confirmation sheet is visible.
+        let fresh = try CleanupSnapshot.capture(
+            list: list([stable.path, appCache.path]), approvedRootURLs: [root])
+        let plan = try fresh.plan(selectedPaths: [stable.path, appCache.path])
+        let active = try XCTUnwrap(plan.revalidatedForLaunch(runningApps: [
+            .init(bundleID: "com.example.Editor", name: "Editor"),
+        ]))
+        XCTAssertEqual(active.plan.items.map(\.identity.path), [stable.path])
+        XCTAssertEqual(active.skippedPaths, [appCache.path])
+    }
+
+    func testRuntimeTranscriptReturnsExactCleanedAndSkippedPaths() {
+        let lines = [
+            "BURROW_CLEANED\t/tmp/cache with spaces",
+            "unrelated output",
+            "BURROW_SKIPPED_CHANGED\t/tmp/live-cache",
+        ]
+        XCTAssertEqual(CleanupRuntimeTranscript.paths(
+            in: lines, prefix: CleanupRuntimeTranscript.cleanedPrefix),
+            Set(["/tmp/cache with spaces"]))
+        XCTAssertEqual(CleanupRuntimeTranscript.paths(
+            in: lines, prefix: CleanupRuntimeTranscript.skippedPrefix),
+            Set(["/tmp/live-cache"]))
     }
 
     func testTrashMoveRestoresAnUnreviewedObjectCapturedByAPathRace() throws {
@@ -383,6 +421,10 @@ final class CleanupAuthorizationTests: XCTestCase {
         XCTAssertTrue(shell.contains("-depth -delete"))
         XCTAssertTrue(shell.contains("/usr/bin/stat -f '%d:%i:%u:%p'"),
                       "the reviewed identity must still be re-checked at the boundary")
+        XCTAssertTrue(shell.contains("/usr/bin/lsappinfo list"),
+                      "running GUI apps must be checked after authentication")
+        XCTAssertTrue(shell.contains("[ -n \"$running_apps\" ] || exit"),
+                      "an unavailable app inventory must fail closed")
 
         XCTAssertEqual(try runCleanupShell(shell), 0)
         XCTAssertFalse(FileManager.default.fileExists(atPath: item.path))
@@ -425,25 +467,36 @@ final class CleanupAuthorizationTests: XCTestCase {
         XCTAssertFalse(FileManager.default.fileExists(atPath: volatile.path))
     }
 
-    /// The deliberate trade behind deleting the tree rooted at the reviewed
-    /// inode rather than an enumerated set of descendants pinned at review
-    /// time.  The preview presents a cache ENTRY with a size, not a file list,
-    /// so "everything under this exact directory" is what the user approved —
-    /// and pinning the full set instead made a clean abort whenever the owning
-    /// app wrote to its own cache between the preview and the confirmation.
-    func testIrreversibleCleanupRemovesContentAddedUnderTheReviewedEntryAfterReview() throws {
+    func testContentAddedUnderReviewedEntryInvalidatesOnlyThatCandidate() throws {
         let item = root.appendingPathComponent("live cache")
+        try FileManager.default.createDirectory(at: item, withIntermediateDirectories: false)
+        let snapshot = try CleanupSnapshot.capture(list: list([item.path]),
+                                                   approvedRootURLs: [root])
+        try Data("written after review".utf8)
+            .write(to: item.appendingPathComponent("added-later"))
+
+        XCTAssertThrowsError(try snapshot.preparePlan(selectedPaths: [item.path])) {
+            XCTAssertEqual($0 as? CleanupSnapshot.SnapshotError, .staleOrChanged)
+        }
+        XCTAssertTrue(FileManager.default.fileExists(atPath: item.path),
+                      "new descendants were never part of the reviewed scope")
+    }
+
+    func testContentAddedAfterFinalValidationInTheSameSecondIsNotDeleted() throws {
+        let item = root.appendingPathComponent("same-second cache")
         try FileManager.default.createDirectory(at: item, withIntermediateDirectories: false)
         let snapshot = try CleanupSnapshot.capture(list: list([item.path]),
                                                    approvedRootURLs: [root])
         let plan = try snapshot.plan(selectedPaths: [item.path])
 
-        try Data("written after review".utf8)
-            .write(to: item.appendingPathComponent("added-later"))
+        // Deliberately do not sleep: this is the sub-second auth-window race
+        // that a second-granularity cutoff failed to observe.
+        let late = item.appendingPathComponent("arrived-after-validation")
+        try Data("keep".utf8).write(to: late)
 
-        XCTAssertEqual(try runCleanupShell(plan.irreversibleCleanupShell()), 0,
-                       "a cache written to between preview and confirmation still cleans")
-        XCTAssertFalse(FileManager.default.fileExists(atPath: item.path))
+        XCTAssertEqual(try runCleanupShell(plan.irreversibleCleanupShell()),
+                       ElevatedExitCode.boundaryCheckFailed)
+        XCTAssertEqual(try String(contentsOf: late), "keep")
     }
 
     func testIrreversibleCleanupDeletesTheLinkNotItsTargetOutsideTheTree() throws {

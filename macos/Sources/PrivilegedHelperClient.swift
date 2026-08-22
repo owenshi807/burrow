@@ -279,24 +279,36 @@ final class PrivilegedHelperClient: @unchecked Sendable {
         // guarantees the optimizer can't drop it early; ordinary scoping is
         // not a guarantee.
         var effectiveReviewedPaths = reviewedPaths
+        var reviewedValidatedAt: Date?
         if operation.needsReviewedPaths, let cleanupPlan {
-            guard let revalidated = cleanupPlan.revalidatedForLaunch() else {
+            let runningApps: [CleanLock.RunningApp]
+            if Thread.isMainThread {
+                runningApps = CleanLock.runningApps()
+            } else {
+                runningApps = DispatchQueue.main.sync { CleanLock.runningApps() }
+            }
+            guard let revalidated = cleanupPlan.revalidatedForLaunch(runningApps: runningApps) else {
                 onLine(NSLocalizedString(
                     "All reviewed items changed or disappeared. Nothing was cleaned.",
                     comment: ""))
                 return .exited(ElevatedExitCode.boundaryCheckFailed)
             }
             effectiveReviewedPaths = revalidated.plan.orderedReviewedPaths()
+            reviewedValidatedAt = revalidated.plan.validatedAt
             if !revalidated.skippedPaths.isEmpty {
                 onLine(String(format: NSLocalizedString(
                     "%d reviewed items changed or disappeared and were skipped.",
                     comment: ""), revalidated.skippedPaths.count))
+                for path in revalidated.skippedPaths {
+                    onLine("BURROW_SKIPPED_CHANGED\t\(path)")
+                }
             }
         }
 
         return withExtendedLifetime(granted) {
             send(payload: granted.externalForm, operation: operation,
                  interface: interface, reviewedPaths: effectiveReviewedPaths,
+                 reviewedValidatedAt: reviewedValidatedAt,
                  invokingUser: invokingUser, onLine: onLine)
         }
     }
@@ -331,6 +343,7 @@ final class PrivilegedHelperClient: @unchecked Sendable {
                       operation: HelperOperation,
                       interface: String?,
                       reviewedPaths: [String],
+                      reviewedValidatedAt: Date?,
                       invokingUser: InvokingUserIdentity,
                       onLine: @escaping (String) -> Void) -> ElevatedOutcome {
         let request = HelperRequest(operation: operation,
@@ -340,7 +353,8 @@ final class PrivilegedHelperClient: @unchecked Sendable {
                                         uid: UInt32(invokingUser.uid),
                                         canonicalHome: invokingUser.canonicalHome),
                                     networkInterface: interface,
-                                    reviewedPaths: reviewedPaths)
+                                    reviewedPaths: reviewedPaths,
+                                    reviewedValidatedAt: reviewedValidatedAt)
         guard let payload = try? JSONEncoder().encode(request) else { return .launchFailed }
 
         let connection = makeConnection()
@@ -466,7 +480,13 @@ struct HelperAwareProcessPort: ProcessPort {
                     let task = Task {
                         var effectiveSpec = spec
                         if let plan = spec.cleanupPlan {
-                            guard let revalidated = plan.revalidatedForLaunch() else {
+                            // This branch is always inside the routing worker
+                            // queue above. NSWorkspace is main-thread bound.
+                            let runningApps = DispatchQueue.main.sync {
+                                CleanLock.runningApps()
+                            }
+                            guard let revalidated = plan.revalidatedForLaunch(
+                                runningApps: runningApps) else {
                                 continuation.yield(.line(NSLocalizedString(
                                     "The reviewed items changed before the run started, so nothing was cleaned.",
                                     comment: "")))

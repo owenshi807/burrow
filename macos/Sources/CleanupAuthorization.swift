@@ -2,15 +2,112 @@
 //  CleanupAuthorization.swift
 //  Burrow
 //
-//  The dry-run file is untrusted input.  A review is backed by one immutable,
-//  short-lived snapshot of canonical allow roots and lstat identities.  The
-//  confirmation renders that snapshot and execution consumes a sealed subset
+//  The dry-run file is untrusted input.  A review is backed by one immutable
+//  snapshot of canonical allow roots and lstat identities. The snapshot does
+//  not become unsafe merely because the user spent time reviewing it: every
+//  selected entry is revalidated when the user clicks Clean and again at the
+//  privileged execution boundary. Changed entries are removed from the plan.
+//  The confirmation renders that snapshot and execution consumes a sealed subset
 //  of the same value; it never re-reads clean-list.txt for authority.
 //
 
 import Foundation
 import CryptoKit
 import Darwin
+
+/// Detect any descendant created or mutated after a cleanup review without
+/// storing a million-path manifest. APFS ctime is kernel-maintained and cannot
+/// be preserved/backdated by an ordinary copy, so additions, replacements,
+/// content writes, renames, and metadata edits all make the root ineligible.
+enum CleanupScopeValidator {
+    static func isUnchanged(root: String, expectedDevice: UInt64, since: Date) -> Bool {
+        var pending = [root]
+        var visited = 0
+        let fileManager = FileManager.default
+
+        while let path = pending.popLast() {
+            visited += 1
+            // A corrupt or unexpectedly enormous candidate should be split by
+            // the scanner, not make the final confirmation appear hung.
+            guard visited <= 1_000_000 else { return false }
+            var info = stat()
+            guard lstat(path, &info) == 0,
+                  UInt64(info.st_dev) == expectedDevice else { return false }
+            let changedAt = Date(timeIntervalSince1970:
+                TimeInterval(info.st_ctimespec.tv_sec)
+                + TimeInterval(info.st_ctimespec.tv_nsec) / 1_000_000_000)
+            guard changedAt <= since else { return false }
+
+            guard (info.st_mode & S_IFMT) == S_IFDIR else { continue }
+            guard let names = try? fileManager.contentsOfDirectory(atPath: path) else {
+                return false
+            }
+            for name in names {
+                pending.append((path as NSString).appendingPathComponent(name))
+            }
+        }
+        return true
+    }
+}
+
+enum CleanupRuntimeTranscript {
+    static let cleanedPrefix = "BURROW_CLEANED\t"
+    static let skippedPrefix = "BURROW_SKIPPED_CHANGED\t"
+
+    static func paths(in lines: [String], prefix: String) -> Set<String> {
+        Set(lines.compactMap { line in
+            guard line.hasPrefix(prefix) else { return nil }
+            let path = String(line.dropFirst(prefix.count))
+            return path.isEmpty ? nil : path
+        })
+    }
+}
+
+/// Values that can associate a reviewed cache path with a live macOS app at
+/// the privileged boundary.  `lsappinfo` reports both bundle identifiers and
+/// display names; deriving the same identifiers from the path lets the root
+/// shell repeat the "app open" guard after the password sheet has closed.
+enum CleanupActiveAppBoundary {
+    static func identityHints(for path: String) -> [String] {
+        let components = (path as NSString).pathComponents.filter {
+            $0 != "/" && !$0.isEmpty
+        }
+        let anchors: Set<String> = ["Caches", "Application Support", "Containers", "Group Containers"]
+        var hints = Set<String>()
+        for (index, component) in components.enumerated() {
+            if anchors.contains(component), components.indices.contains(index + 1) {
+                let tail = Array(components.dropFirst(index + 1).prefix(3))
+                // Browser support trees often split the app name across
+                // directories (`Google/Chrome`, `Microsoft/Edge`). Include
+                // cumulative display-name forms, not only the first token.
+                for length in 1...tail.count {
+                    hints.insert(tail.prefix(length).joined(separator: " "))
+                }
+                let generic = Set(["cache", "caches", "data", "default", "profile", "profiles"])
+                for value in tail where !generic.contains(value.lowercased()) {
+                    hints.insert(value)
+                }
+            }
+            if component.contains("."), !component.hasPrefix(".") {
+                hints.insert(component)
+                let parts = component.split(separator: ".").map(String.init)
+                if parts.count >= 2 {
+                    hints.insert(parts.suffix(2).joined(separator: " "))
+                }
+            }
+        }
+        return hints.filter { !$0.isEmpty }.sorted()
+    }
+
+    static func shellCheck(for path: String) -> String {
+        let checks = identityHints(for: path).flatMap { hint in
+            ["bundleID=\"\(hint)\"", "\"\(hint)\" ASN:"].map { marker in
+                "/usr/bin/printf '%s\\n' \"$running_apps\" | /usr/bin/grep -F -q -- \(MoleCLI.shellQuote(marker))"
+            }
+        }
+        return checks.isEmpty ? "/usr/bin/false" : "(" + checks.joined(separator: " || ") + ")"
+    }
+}
 
 struct CleanupExecutionPlan: Sendable, Equatable {
     struct Item: Sendable, Equatable {
@@ -19,37 +116,54 @@ struct CleanupExecutionPlan: Sendable, Equatable {
         /// rooted at THIS pinned inode; it does not enumerate and pin every
         /// descendant, because the review never presented them individually.
         let identity: PinnedFileIdentity
+        /// Descendants are not individually authorized, but any descendant
+        /// created or mutated after the review changes its ctime. Before each
+        /// irreversible boundary Burrow walks this root and drops it if that
+        /// happened, so a long-lived review cannot absorb new content.
+        let unchangedSince: Date
+
+        func matchesCurrentScope() -> Bool {
+            identity.matchesCurrent()
+                && CleanupScopeValidator.isUnchanged(
+                    root: identity.path,
+                    expectedDevice: identity.device,
+                    since: unchangedSince)
+        }
     }
 
     let snapshotID: UUID
     let createdAt: Date
-    let expiresAt: Date
+    /// Last exact in-process scope validation. The root shell uses this as a
+    /// second boundary against changes while authentication is visible.
+    let validatedAt: Date
     let approvedRoots: [PinnedFileIdentity]
     let items: [Item]
     private let seal: Data
 
-    fileprivate init(snapshotID: UUID, createdAt: Date, expiresAt: Date,
+    fileprivate init(snapshotID: UUID, createdAt: Date, validatedAt: Date,
                      approvedRoots: [PinnedFileIdentity], items: [Item]) {
         self.snapshotID = snapshotID
         self.createdAt = createdAt
-        self.expiresAt = expiresAt
+        self.validatedAt = validatedAt
         self.approvedRoots = approvedRoots
         self.items = items
         self.seal = Self.makeSeal(snapshotID: snapshotID, createdAt: createdAt,
-                                  expiresAt: expiresAt, roots: approvedRoots, items: items)
+                                  validatedAt: validatedAt,
+                                  roots: approvedRoots, items: items)
     }
 
-    func validateForLaunch(now: Date = Date()) -> Bool {
-        validateEnvelopeForLaunch(now: now) && items.allSatisfy { $0.identity.matchesCurrent() }
+    func validateForLaunch(now _: Date = Date()) -> Bool {
+        validateEnvelopeForLaunch() && items.allSatisfy { $0.matchesCurrentScope() }
     }
 
     /// Validate plan-level authority without turning one volatile item into a
-    /// batch-level failure. Expiry, seal, roots, and containment are global;
+    /// batch-level failure. Seal, roots, and containment are global;
     /// item identity is deliberately checked by the caller per item.
-    func validateEnvelopeForLaunch(now: Date = Date()) -> Bool {
-        guard now <= expiresAt, !items.isEmpty,
+    func validateEnvelopeForLaunch(now _: Date = Date()) -> Bool {
+        guard !items.isEmpty,
               seal == Self.makeSeal(snapshotID: snapshotID, createdAt: createdAt,
-                                    expiresAt: expiresAt, roots: approvedRoots, items: items),
+                                    validatedAt: validatedAt,
+                                    roots: approvedRoots, items: items),
               approvedRoots.allSatisfy({ $0.matchesCurrent() }) else { return false }
         let rootPrefixes: [(device: UInt64, path: String, prefix: String)] = approvedRoots.map {
             ($0.device, $0.path, $0.path.hasSuffix("/") ? $0.path : $0.path + "/")
@@ -70,19 +184,26 @@ struct CleanupExecutionPlan: Sendable, Equatable {
 
     /// Drop only entries whose pinned identity changed. A fresh sealed plan is
     /// produced for the stable subset; global trust failures still fail closed.
-    func revalidatedForLaunch(now: Date = Date()) -> Revalidation? {
-        guard validateEnvelopeForLaunch(now: now) else { return nil }
+    func revalidatedForLaunch(
+        now: Date = Date(),
+        runningApps: [CleanLock.RunningApp] = []
+    ) -> Revalidation? {
+        guard validateEnvelopeForLaunch() else { return nil }
         var stable: [Item] = []
         var skipped: [String] = []
         for item in items {
-            if item.identity.matchesCurrent() { stable.append(item) }
+            if item.matchesCurrentScope(),
+               CleanLock.lockReason(for: item.identity.path, running: runningApps) == nil {
+                stable.append(item)
+            }
             else { skipped.append(item.identity.path) }
         }
         guard !stable.isEmpty else { return nil }
         let plan = CleanupExecutionPlan(snapshotID: snapshotID, createdAt: createdAt,
-                                        expiresAt: expiresAt, approvedRoots: approvedRoots,
+                                        validatedAt: now,
+                                        approvedRoots: approvedRoots,
                                         items: stable)
-        guard plan.validateForLaunch(now: now) else { return nil }
+        guard plan.validateForLaunch() else { return nil }
         return Revalidation(plan: plan, skippedPaths: skipped)
     }
 
@@ -90,8 +211,7 @@ struct CleanupExecutionPlan: Sendable, Equatable {
     /// repeated after the password dialog because that dialog is an unbounded
     /// attacker-controlled delay.
     func executionBoundaryChecks() -> [String] {
-        let expiry = Int(expiresAt.timeIntervalSince1970)
-        return ["[ \"$(/bin/date +%s)\" -le \(expiry) ]"] + approvedRoots.map { identity in
+        approvedRoots.map { identity in
             let path = MoleCLI.shellQuote(identity.path)
             let token = MoleCLI.shellQuote(identity.shellStatToken)
             return "[ \"$(/usr/bin/stat -f '%d:%i:%u:%p' -- \(path) 2>/dev/null)\" = \(token) ]"
@@ -158,34 +278,55 @@ struct CleanupExecutionPlan: Sendable, Equatable {
             let rhs = $1.identity.path.filter { $0 == "/" }.count
             return lhs == rhs ? $0.identity.path < $1.identity.path : lhs > rhs
         }
+        // `stat`'s F format preserves the timespec fraction; unlike
+        // `find -newerct`, this has no one-second blind window and does not
+        // falsely reject an unchanged tree reviewed in the current second.
+        let boundaryTime = String(
+            format: "%.9f", locale: Locale(identifier: "en_US_POSIX"),
+            validatedAt.timeIntervalSince1970)
         let itemSteps = ordered.map { item -> String in
             let identity = item.identity
             let path = MoleCLI.shellQuote(identity.path)
             let token = MoleCLI.shellQuote(identity.shellStatToken)
             let current = "$(/usr/bin/stat -f '%d:%i:%u:%p' -- \(path) 2>/dev/null)"
-            return "if [ \"\(current)\" = \(token) ]; then "
+            let scopeTimes = "scope_times=$(/usr/bin/find -x \"$p\" -exec /usr/bin/stat -f '%.9Fc' -- {} + 2>/dev/null)"
+            let scopeChanged = "/usr/bin/printf '%s\\n' \"$scope_times\" | /usr/bin/awk -v cutoff=\"$scope_cutoff\" '{ if (($1 + 0) > (cutoff + 0)) changed=1 } END { exit(changed ? 0 : 1) }'"
+            let lsof = identity.isDirectory
+                ? "/usr/sbin/lsof -n -P +D \"$p\" >/dev/null 2>&1"
+                : "/usr/sbin/lsof -n -P -- \"$p\" >/dev/null 2>&1"
+            let activeApp = CleanupActiveAppBoundary.shellCheck(for: identity.path)
+            return "p=\(path); if [ \"\(current)\" = \(token) ] "
+                + "&& \(scopeTimes) && [ -n \"$scope_times\" ] && ! (\(scopeChanged)) "
+                + "&& ! \(lsof) && ! \(activeApp); then "
                 + "attempted=$((attempted + 1)); p=\(path); "
                 + "/usr/bin/find -x \"$p\" -depth -delete; "
-                + "if [ -e \"$p\" ] || [ -L \"$p\" ]; then failed=1; fi; "
-                + "else skipped=$((skipped + 1)); fi"
+                + "if [ -e \"$p\" ] || [ -L \"$p\" ]; then failed=1; "
+                + "else /usr/bin/printf '%s\\t%s\\n' 'BURROW_CLEANED' \"$p\"; fi; "
+                + "else skipped=$((skipped + 1)); "
+                + "/usr/bin/printf '%s\\t%s\\n' 'BURROW_SKIPPED_CHANGED' \"$p\"; fi"
         }
-        let loop = (["failed=0", "attempted=0", "skipped=0"] + itemSteps + [
+        let loop = (["running_apps=$(/usr/bin/lsappinfo list 2>/dev/null)",
+                     "[ -n \"$running_apps\" ] || exit \(ElevatedExitCode.boundaryCheckFailed)",
+                     "scope_cutoff=\(MoleCLI.shellQuote(boundaryTime))",
+                     "failed=0", "attempted=0", "skipped=0"] + itemSteps + [
             "[ \"$attempted\" -gt 0 ] || exit \(ElevatedExitCode.boundaryCheckFailed)",
             "[ \"$failed\" -eq 0 ]",
         ]).joined(separator: "; ")
         return (checks + [loop]).joined(separator: "; ")
     }
 
-    private static func makeSeal(snapshotID: UUID, createdAt: Date, expiresAt: Date,
+    private static func makeSeal(snapshotID: UUID, createdAt: Date, validatedAt: Date,
                                  roots: [PinnedFileIdentity], items: [Item]) -> Data {
         func line(_ i: PinnedFileIdentity) -> String {
             "\(i.path.utf8.count):\(i.path)|\(i.shellStatToken)"
         }
         let payload = ([snapshotID.uuidString,
                         String(createdAt.timeIntervalSince1970.bitPattern),
-                        String(expiresAt.timeIntervalSince1970.bitPattern)]
+                        String(validatedAt.timeIntervalSince1970.bitPattern)]
             + roots.map { "root:\(line($0))" } + ["--items--"]
-            + items.map { "item:\(line($0.identity))" })
+            + items.map {
+                "item:\(line($0.identity))|\($0.unchangedSince.timeIntervalSince1970.bitPattern)"
+            })
             .joined(separator: "\n")
         return Data(SHA256.hash(data: Data(payload.utf8)))
     }
@@ -206,6 +347,7 @@ struct CleanupSnapshot: Sendable, Equatable {
         case missingPath(String)
         case selectionMismatch
         case staleOrChanged
+        case overlappingCandidate(String)
 
         var errorDescription: String? {
             switch self {
@@ -220,22 +362,15 @@ struct CleanupSnapshot: Sendable, Equatable {
             case .unexpectedVolume(let p): return "The cleanup preview crossed onto an unexpected volume: \(p)"
             case .missingPath(let p): return "A reviewed cleanup item no longer exists: \(p)"
             case .selectionMismatch: return "The cleanup selection no longer matches the reviewed preview."
-            case .staleOrChanged: return "The cleanup preview is stale or changed."
+            case .staleOrChanged: return "Every selected cleanup item changed or is no longer available."
+            case .overlappingCandidate(let p):
+                return "\(p) contains cleanup candidates that are reviewed separately. Select those child items instead."
             }
         }
     }
 
-    /// A bounded review session, long enough for an Agent to inspect a large
-    /// scan before the user reaches confirmation. Safety does not depend on
-    /// the preview being only a few minutes old: every selected root's pinned
-    /// identity is checked again while preparing the plan, again immediately
-    /// before launch, and once more after the administrator dialog. The
-    /// expiry bounds how long that path-scoped authorization may be reused.
-    static let lifetime: TimeInterval = 15 * 60
-
     let id: UUID
     let createdAt: Date
-    let expiresAt: Date
     let list: CleanList
     let approvedRoots: [PinnedFileIdentity]
     let items: [CleanupExecutionPlan.Item]
@@ -273,6 +408,11 @@ struct CleanupSnapshot: Sendable, Equatable {
         var seen = Set<String>()
         var captured: [CleanupExecutionPlan.Item] = []
         var skipped: [SkippedEntry] = []
+        let rawPaths = list.categories.flatMap(\.items).map(\.path)
+        let overlappingParents = Set(rawPaths.filter { path in
+            let prefix = path.hasSuffix("/") ? path : path + "/"
+            return rawPaths.contains { $0 != path && $0.hasPrefix(prefix) }
+        })
 
         // Every refusal below is per-entry. Skipping can only ever REMOVE
         // something from the delete set, so failing this way is strictly safer
@@ -303,6 +443,9 @@ struct CleanupSnapshot: Sendable, Equatable {
             guard let canonical = InvokingUserIdentity.canonicalPath(raw), canonical == raw else {
                 refuse(raw, .symbolicLink(raw)); continue
             }
+            if overlappingParents.contains(raw) {
+                refuse(raw, .overlappingCandidate(raw)); continue
+            }
             guard seen.insert(canonical).inserted else { continue }
             guard let identity = try? PinnedFileIdentity.capture(canonical) else {
                 refuse(canonical, .missingPath(canonical)); continue
@@ -312,12 +455,12 @@ struct CleanupSnapshot: Sendable, Equatable {
             } catch let error as SnapshotError {
                 refuse(canonical, error); continue
             }
-            captured.append(.init(identity: identity))
+            captured.append(.init(identity: identity, unchangedSince: now))
         }
         // Only a preview with NOTHING usable is fatal. Anything else stays
         // cleanable, minus the entries named in `skipped`.
         guard !captured.isEmpty else { throw SnapshotError.selectionMismatch }
-        return Self(id: UUID(), createdAt: now, expiresAt: now.addingTimeInterval(lifetime),
+        return Self(id: UUID(), createdAt: now,
                     list: list, approvedRoots: roots, items: captured, skipped: skipped)
     }
 
@@ -330,8 +473,7 @@ struct CleanupSnapshot: Sendable, Equatable {
         return root
     }
 
-    private func unvalidatedPlan(selectedPaths: [String], now: Date) throws -> CleanupExecutionPlan {
-        guard now <= expiresAt else { throw SnapshotError.staleOrChanged }
+    private func unvalidatedPlan(selectedPaths: [String], now _: Date) throws -> CleanupExecutionPlan {
         let selected = Set(selectedPaths)
         let byPath = Dictionary(uniqueKeysWithValues: items.map { ($0.identity.path, $0) })
         guard !selected.isEmpty, selected.count == selectedPaths.count,
@@ -340,7 +482,7 @@ struct CleanupSnapshot: Sendable, Equatable {
         }
         let ordered = items.filter { selected.contains($0.identity.path) }
         return CleanupExecutionPlan(snapshotID: id, createdAt: createdAt,
-                                    expiresAt: expiresAt,
+                                    validatedAt: createdAt,
                                     approvedRoots: approvedRoots, items: ordered)
     }
 

@@ -38,6 +38,13 @@ final class CleanLockTests: XCTestCase {
         XCTAssertEqual(reason, .appOpen(appName: "Claude"))
     }
 
+    func testSplitBrowserVendorAndProductMatchesDisplayName() {
+        let reason = CleanLock.lockReason(
+            for: "/Users/x/Library/Application Support/Google/Chrome/Default/CRX-cache",
+            running: [.init(bundleID: "com.google.Chrome", name: "Google Chrome")])
+        XCTAssertEqual(reason, .appOpen(appName: "Google Chrome"))
+    }
+
     func testUnrelatedPath_isNotLocked() {
         XCTAssertNil(CleanLock.lockReason(for: "/Users/x/.npm/_cacache", running: running))
         XCTAssertNil(CleanLock.lockReason(for: "/Users/x/Library/Caches/com.apple.helpd", running: running))

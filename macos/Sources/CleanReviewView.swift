@@ -20,7 +20,6 @@ struct CleanReviewView: View {
 
     @State private var expanded: Set<String> = []
     @State private var evidenceExpanded = false
-    @Environment(\.accessibilityReduceMotion) private var reduceMotion
 
     var body: some View {
         VStack(spacing: 0) {
@@ -185,7 +184,7 @@ struct CleanReviewView: View {
                     agentPhase("Relationships", symbol: "point.3.connected.trianglepath.dotted",
                                state: progress.phase == .investigating ? .active : .done)
                     agentPhaseConnector(done: progress.phase != .investigating)
-                    agentPhase("Safety check", symbol: "shield.checkered",
+                    agentPhase("Plan validation", symbol: "shield.checkered",
                                state: progress.phase == .validating ? .active : .pending)
                 }
                 .accessibilityElement(children: .combine)
@@ -197,7 +196,7 @@ struct CleanReviewView: View {
         }
     }
 
-    private func agentCompletedDisclosure(summary: String) -> some View {
+    private func agentCompletedDisclosure(summary _: String) -> some View {
         let reviewed = planStore.agentProgress?.reviewedCount ?? planStore.totalCount
         let duration = planStore.agentProgress.map { elapsedText($0.elapsed()) }
         return HStack(alignment: .top, spacing: 11) {
@@ -210,14 +209,13 @@ struct CleanReviewView: View {
                     .font(Brand.sans(12, .semibold)).foregroundStyle(Brand.textPrimary)
                 if let duration {
                     Text(String(
-                        format: NSLocalizedString("Finished in %@. Burrow safety checks passed.", comment: "cleanup Agent completion metadata"),
+                        format: NSLocalizedString("Finished in %@. Candidate mapping and path policy checks passed.", comment: "cleanup Agent completion metadata"),
                         duration))
                         .font(Brand.mono(9)).foregroundStyle(Brand.textTertiary)
                 }
-                if !summary.isEmpty {
-                    Text(summary).font(Brand.sans(10)).foregroundStyle(Brand.textSecondary)
-                        .fixedSize(horizontal: false, vertical: true)
-                }
+                Text(planStore.overallRecommendationText)
+                    .font(Brand.sans(10)).foregroundStyle(Brand.textSecondary)
+                    .fixedSize(horizontal: false, vertical: true)
             }
         }
         .padding(12)
@@ -304,13 +302,16 @@ struct CleanReviewView: View {
         let selectedBytes = planStore.selectedBytes(in: section.candidates)
         let totalBytes = section.candidates.reduce(Int64(0)) { $0 + $1.sizeBytes }
         return VStack(spacing: 0) {
-            Button {
-                withAnimation(reduceMotion ? nil : .easeInOut(duration: 0.18)) {
-                    if isOpen { expanded.remove(key) } else { expanded.insert(key) }
+            HStack(spacing: 11) {
+                triStateBox(state) {
+                    planStore.toggleCategory(section.category, disposition: section.disposition)
                 }
-            } label: {
-                HStack(spacing: 11) {
-                    triStateBox(state) { planStore.toggleCategory(section.category, disposition: section.disposition) }
+                Button {
+                    // Section identity and order stay fixed. Expanding is a
+                    // direct disclosure, not a transition for every card.
+                    if isOpen { expanded.remove(key) } else { expanded.insert(key) }
+                } label: {
+                    HStack(spacing: 11) {
                     Image(systemName: Self.glyph(for: section.category))
                         .font(.system(size: 13)).foregroundStyle(accent).frame(width: 20)
                     VStack(alignment: .leading, spacing: 2) {
@@ -333,10 +334,12 @@ struct CleanReviewView: View {
                     Image(systemName: "chevron.right")
                         .font(.system(size: 10, weight: .semibold)).foregroundStyle(Brand.textTertiary)
                         .rotationEffect(.degrees(isOpen ? 90 : 0))
+                    }
+                    .contentShape(Rectangle())
                 }
-                .padding(13).contentShape(Rectangle())
+                .buttonStyle(.plain)
             }
-            .buttonStyle(.plain)
+            .padding(13)
 
             if isOpen {
                 Rectangle().fill(Brand.hairline).frame(height: 1).padding(.horizontal, 13)
@@ -379,21 +382,26 @@ struct CleanReviewView: View {
                 }.overlay(RoundedRectangle(cornerRadius: 5).strokeBorder(Brand.hairline))
             }.buttonStyle(.plain).disabled(candidate.locked)
 
-            VStack(alignment: .leading, spacing: 2) {
-                Text(candidate.displayName).font(Brand.sans(12)).foregroundStyle(Brand.textPrimary).lineLimit(1)
-                Text(candidate.abbreviatedPath).font(Brand.mono(9)).foregroundStyle(Brand.textTertiary)
-                    .lineLimit(1).truncationMode(.middle)
+            Button { planStore.selectCandidate(candidate.id) } label: {
+                HStack(spacing: 10) {
+                    VStack(alignment: .leading, spacing: 2) {
+                        Text(candidate.displayName).font(Brand.sans(12)).foregroundStyle(Brand.textPrimary).lineLimit(1)
+                        Text(candidate.abbreviatedPath).font(Brand.mono(9)).foregroundStyle(Brand.textTertiary)
+                            .lineLimit(1).truncationMode(.middle)
+                    }
+                    Spacer()
+                    judgmentBadge(recommendation, candidate: candidate)
+                    Text(candidate.sizeText).font(Brand.mono(11)).foregroundStyle(Brand.textSecondary)
+                        .frame(minWidth: 56, alignment: .trailing)
+                    Image(systemName: "chevron.right").font(.system(size: 9, weight: .semibold))
+                        .foregroundStyle(active ? accent : Brand.textTertiary)
+                }
+                .contentShape(Rectangle())
             }
-            Spacer()
-            judgmentBadge(recommendation, candidate: candidate)
-            Text(candidate.sizeText).font(Brand.mono(11)).foregroundStyle(Brand.textSecondary)
-                .frame(minWidth: 56, alignment: .trailing)
-            Image(systemName: "chevron.right").font(.system(size: 9, weight: .semibold))
-                .foregroundStyle(active ? accent : Brand.textTertiary)
+            .buttonStyle(.plain)
         }
         .padding(.horizontal, 14).padding(.vertical, 7)
         .background(active ? accent.opacity(0.06) : Color.clear)
-        .contentShape(Rectangle()).onTapGesture { planStore.selectCandidate(candidate.id) }
         .contextMenu {
             Button(NSLocalizedString("Reveal in Finder", comment: "")) { AnalyzeIcons.reveal(candidate.path) }
             Button(NSLocalizedString("Always skip this", comment: "")) {
@@ -484,10 +492,93 @@ struct CleanReviewView: View {
                     .padding(18).padding(.bottom, 70)
                 }.scrollIndicators(.hidden)
             } else {
-                Text("Select a candidate to see its judgment.")
-                    .font(Brand.sans(11)).foregroundStyle(Brand.textSecondary).padding(20)
+                overallInspector
             }
         }.background(Brand.nearBlack.opacity(0.35))
+    }
+
+    private var overallInspector: some View {
+        ScrollView {
+            VStack(alignment: .leading, spacing: 17) {
+                VStack(alignment: .leading, spacing: 5) {
+                    Text(overallInspectorTitle)
+                        .font(Brand.serif(20, .medium)).foregroundStyle(Brand.textPrimary)
+                    TimelineView(.periodic(from: .now, by: 60)) { context in
+                        Text(snapshotAgeText(at: context.date))
+                            .font(Brand.mono(9)).foregroundStyle(Brand.textTertiary)
+                    }
+                }
+
+                VStack(alignment: .leading, spacing: 9) {
+                    Label("Plan-wide judgment", systemImage: "sparkles")
+                        .font(Brand.sans(13, .semibold)).foregroundStyle(accent)
+                    Text(planStore.overallRecommendationText)
+                        .font(Brand.sans(11)).foregroundStyle(Brand.textPrimary)
+                        .fixedSize(horizontal: false, vertical: true)
+                }
+                .padding(13)
+                .background(RoundedRectangle(cornerRadius: 13).fill(accent.opacity(0.08)))
+
+                VStack(spacing: 10) {
+                    overviewMetric(.delete)
+                    overviewMetric(.humanIntentRequired)
+                    overviewMetric(.keep)
+                }
+
+                if !planStore.userOverrides.isEmpty {
+                    Text(String(
+                        format: NSLocalizedString("Your %d manual changes are already applied to the staged plan; Codex's original judgment remains visible on each item.", comment: "cleanup overview manual changes"),
+                        planStore.userOverrides.count))
+                        .font(Brand.sans(10, .semibold)).foregroundStyle(Brand.amber)
+                        .fixedSize(horizontal: false, vertical: true)
+                }
+
+                Text("Select any item to inspect its reason and evidence. You can include a suggested keep or exclude a suggested cleanup; your choice wins.")
+                    .font(Brand.sans(10)).foregroundStyle(Brand.textSecondary)
+                    .fixedSize(horizontal: false, vertical: true)
+
+                Button(NSLocalizedString("Ask Codex to reassess the full scan", comment: ""), action: onRetryAgent)
+                    .buttonStyle(.plain).font(Brand.sans(10, .semibold)).foregroundStyle(accent)
+            }
+            .padding(18).padding(.bottom, 70)
+        }
+        .scrollIndicators(.hidden)
+    }
+
+    private func overviewMetric(_ disposition: CleanupRecommendationDisposition) -> some View {
+        HStack(spacing: 10) {
+            Image(systemName: disposition.symbol)
+                .font(.system(size: 11, weight: .semibold)).foregroundStyle(disposition.color)
+                .frame(width: 20, height: 20)
+                .background(Circle().fill(disposition.color.opacity(0.1)))
+            Text(disposition.title).font(Brand.sans(11, .semibold)).foregroundStyle(Brand.textPrimary)
+            Spacer()
+            Text("\(planStore.recommendationCount(for: disposition)) · \(Fmt.bytes(planStore.recommendationBytes(for: disposition)))")
+                .font(Brand.mono(10)).foregroundStyle(Brand.textSecondary)
+        }
+    }
+
+    private var overallInspectorTitle: String {
+        switch planStore.agentState {
+        case .ready:
+            return NSLocalizedString("Burrow reviewed plan", comment: "cleanup overall inspector")
+        case .analyzing:
+            return NSLocalizedString("Codex is analyzing", comment: "cleanup overall inspector")
+        case .degraded:
+            return NSLocalizedString("Codex review incomplete", comment: "cleanup overall inspector")
+        default:
+            return NSLocalizedString("Scanner baseline", comment: "cleanup overall inspector")
+        }
+    }
+
+    private func snapshotAgeText(at now: Date) -> String {
+        let minutes = max(0, Int(now.timeIntervalSince(planStore.snapshotCreatedAt) / 60))
+        if minutes == 0 {
+            return NSLocalizedString("All scanner candidates · captured just now", comment: "cleanup snapshot age")
+        }
+        return String(
+            format: NSLocalizedString("All scanner candidates · captured %d min ago · rechecked at cleanup", comment: "cleanup snapshot age"),
+            minutes)
     }
 
     // MARK: - Footer
@@ -512,8 +603,8 @@ struct CleanReviewView: View {
                     .padding(.horizontal, 20).padding(.vertical, 10)
                     .background(Capsule().fill(Color.white))
             }
-            .buttonStyle(.plain).disabled(planStore.selectedCount == 0)
-            .opacity(planStore.selectedCount == 0 ? 0.5 : 1)
+            .buttonStyle(.plain).disabled(!planStore.canConfirmPlan)
+            .opacity(planStore.canConfirmPlan ? 1 : 0.5)
         }
         .padding(.horizontal, 22).padding(.vertical, 12)
         .background(LinearGradient(colors: [Brand.nearBlack.opacity(0), Brand.nearBlack.opacity(0.92)],
@@ -522,9 +613,14 @@ struct CleanReviewView: View {
 
     private var pillLabel: String {
         let total = Fmt.bytes(planStore.selectedBytes)
+        if case .analyzing = planStore.agentState {
+            return NSLocalizedString("Waiting for Codex analysis", comment: "cleanup confirm pill")
+        }
+        if case .degraded = planStore.agentState {
+            return NSLocalizedString("Codex review incomplete · Retry", comment: "cleanup confirm pill")
+        }
         if planStore.canUseAgentCTA {
-            return String(format: NSLocalizedString("Clean %@ recommendation · %@", comment: ""),
-                          planStore.agentDisplayName, total)
+            return String(format: NSLocalizedString("Clean verified plan · %@", comment: ""), total)
         }
         if !planStore.userOverrides.isEmpty {
             return String(format: NSLocalizedString("Clean current plan · %@", comment: ""), total)

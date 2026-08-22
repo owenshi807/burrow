@@ -483,18 +483,26 @@ struct HelperRequest: Codable, Equatable, Sendable {
     /// refused rather than having them ignored.
     var reviewedPaths: [String] = []
 
+    /// Exact instant at which the GUI last walked every descendant in the
+    /// reviewed plan. The daemon refuses future values and repeats that walk
+    /// after authorization. Older values only make the check more
+    /// conservative; they never broaden deletion authority.
+    var reviewedValidatedAt: Date? = nil
+
     init(operation: HelperOperation,
          operationID: String,
          clientBuild: String,
          invokingUser: HelperInvokingUserClaim,
          networkInterface: String? = nil,
-         reviewedPaths: [String] = []) {
+         reviewedPaths: [String] = [],
+         reviewedValidatedAt: Date? = nil) {
         self.operation = operation
         self.operationID = operationID
         self.clientBuild = clientBuild
         self.invokingUser = invokingUser
         self.networkInterface = networkInterface
         self.reviewedPaths = reviewedPaths
+        self.reviewedValidatedAt = reviewedValidatedAt
     }
 
     /// `nil` when the request is well formed. Runs on the PRIVILEGED side —
@@ -503,6 +511,7 @@ struct HelperRequest: Codable, Equatable, Sendable {
     /// `liveInterfaces` is injected so the rule stays pure and testable; the
     /// daemon passes the real list from the system.
     func validate(expectedBuild: String,
+                  now: Date = Date(),
                   liveInterfaces: @autoclosure () -> Set<String> = []) -> HelperRequestRejection? {
         guard UUID(uuidString: operationID) != nil else { return .malformedOperationID }
         guard HelperVersionSkew.evaluate(appBuild: expectedBuild, helperBuild: clientBuild) == .matched else {
@@ -522,12 +531,16 @@ struct HelperRequest: Codable, Equatable, Sendable {
             // decided by HelperReviewedPathPolicy against the daemon's own
             // lstat — this check just refuses obvious nonsense early.
             guard !reviewedPaths.isEmpty,
-                  reviewedPaths.count <= HelperReviewedPathPolicy.maximumTargets
+                  reviewedPaths.count <= HelperReviewedPathPolicy.maximumTargets,
+                  let reviewedValidatedAt,
+                  reviewedValidatedAt <= now
             else { return .invalidReviewedPaths }
         } else {
             // Paths on an operation that takes none means the caller and this
             // contract disagree about what is being asked for.
-            guard reviewedPaths.isEmpty else { return .invalidReviewedPaths }
+            guard reviewedPaths.isEmpty, reviewedValidatedAt == nil else {
+                return .invalidReviewedPaths
+            }
         }
 
         if operation.needsInterface {

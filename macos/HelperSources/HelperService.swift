@@ -224,6 +224,39 @@ enum HelperReviewedCleanup {
             return lstat(path, &status) == 0
         }
     }
+
+    /// Repeat the GUI's exact descendant-ctime guard inside the privileged
+    /// process, after authentication and immediately before deletion. A
+    /// changed root is skipped independently so one volatile cache does not
+    /// invalidate the rest of the reviewed plan.
+    static func scopeIsUnchanged(_ root: String, since: Date) -> Bool {
+        var rootStatus = stat()
+        guard lstat(root, &rootStatus) == 0 else { return false }
+        let expectedDevice = rootStatus.st_dev
+        var pending = [root]
+        var visited = 0
+        while let path = pending.popLast() {
+            visited += 1
+            guard visited <= 1_000_000 else { return false }
+            var status = stat()
+            guard lstat(path, &status) == 0,
+                  status.st_dev == expectedDevice else { return false }
+            let changedAt = Date(timeIntervalSince1970:
+                TimeInterval(status.st_ctimespec.tv_sec)
+                + TimeInterval(status.st_ctimespec.tv_nsec) / 1_000_000_000)
+            guard changedAt <= since else { return false }
+            guard (status.st_mode & S_IFMT) == S_IFDIR,
+                  let names = try? FileManager.default.contentsOfDirectory(atPath: path)
+            else {
+                if (status.st_mode & S_IFMT) == S_IFDIR { return false }
+                continue
+            }
+            for name in names {
+                pending.append((path as NSString).appendingPathComponent(name))
+            }
+        }
+        return true
+    }
 }
 
 // MARK: - Engine resolution
@@ -657,6 +690,44 @@ final class HelperService: NSObject, BurrowHelperProtocol {
         }
         helperTrace("authorized: \(decision.diagnostic)")
 
+        let client = connection.remoteObjectProxy as? BurrowHelperClientProtocol
+
+        // Authentication can remain visible indefinitely. Rebuild the path
+        // policy and re-walk every descendant on THIS side of that delay; a
+        // client-side check cannot authorize a later root deletion.
+        if request.operation.needsReviewedPaths {
+            guard let cutoff = request.reviewedValidatedAt else {
+                helperTrace("request refused: reviewed cleanup missing validation boundary")
+                return respond(.rejected(.invalidReviewedPaths))
+            }
+            let roots = HelperReviewedCleanup.approvedRoots(for: invokingUser)
+            var stable: [String] = []
+            var skipped: [String] = []
+            for path in request.reviewedPaths {
+                let decision = HelperReviewedPathPolicy.validate(
+                    paths: [path], roots: roots, invokingUID: invokingUser.uid,
+                    inspect: HelperReviewedCleanup.inspect)
+                if case .success(let accepted) = decision,
+                   let acceptedPath = accepted.first,
+                   HelperReviewedCleanup.scopeIsUnchanged(acceptedPath, since: cutoff) {
+                    stable.append(acceptedPath)
+                } else {
+                    skipped.append(path)
+                }
+            }
+            for path in skipped {
+                client?.helperDidEmit(line: "BURROW_SKIPPED_CHANGED\t\(path)",
+                                      operationID: request.operationID)
+            }
+            guard !stable.isEmpty else {
+                helperTrace("reviewed cleanup had no unchanged targets after authorization")
+                // Keep the GUI's cleanup-boundary taxonomy without importing
+                // the app-only execution layer into the minimal root target.
+                return respond(.exited(124))
+            }
+            reviewedPaths = stable
+        }
+
         // Gate 5 — execution. Our own signed engine, or a system tool from the
         // closed set; fixed argv either way.
         var engineSnapshot: HelperExecutableSnapshot?
@@ -675,7 +746,6 @@ final class HelperService: NSObject, BurrowHelperProtocol {
 
         helperTrace("running \(request.operation.rawValue) (mutating: \(request.operation.mutatesDisk))")
 
-        let client = connection.remoteObjectProxy as? BurrowHelperClientProtocol
         let operationID = request.operationID
         var code = runner.run(operation: request.operation,
                               operationID: operationID,
@@ -701,6 +771,11 @@ final class HelperService: NSObject, BurrowHelperProtocol {
             code = survivors.isEmpty ? 0 : 1
             if !survivors.isEmpty {
                 helperTrace("reviewed cleanup left \(survivors.count) of \(reviewedPaths.count) entries")
+            }
+            let survivorSet = Set(survivors)
+            for path in reviewedPaths where !survivorSet.contains(path) {
+                client?.helperDidEmit(line: "BURROW_CLEANED\t\(path)",
+                                      operationID: operationID)
             }
         }
         helperTrace("operation finished with status \(code)")

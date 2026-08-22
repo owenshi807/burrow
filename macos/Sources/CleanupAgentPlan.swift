@@ -135,6 +135,7 @@ final class CleanupPlanStore: ObservableObject {
     }
 
     @Published private(set) var planId = UUID()
+    @Published private(set) var snapshotCreatedAt = Date()
     @Published private(set) var revision = 0
     @Published private(set) var candidates: [CleanupPlanCandidate] = []
     @Published private(set) var recommendations: [String: CleanupCandidateRecommendation] = [:]
@@ -166,6 +167,7 @@ final class CleanupPlanStore: ObservableObject {
               hasAgentConsent: Bool) {
         analysisTask?.cancel()
         planId = UUID()
+        snapshotCreatedAt = snapshot.createdAt
         revision = 1
         userOverrides = []
         currentAgentRunId = nil
@@ -175,7 +177,18 @@ final class CleanupPlanStore: ObservableObject {
         // canonicalize here too: callers can construct a CleanList directly
         // without passing through the text parser.
         let canonicalList = list.deduplicatedByPath()
-        selection = CleanSelection(list: canonicalList, locked: locked)
+        let candidatePaths = canonicalList.categories.flatMap(\.items).map(\.path)
+        let coarseParentPaths = Set(candidatePaths.filter { path in
+            let prefix = path.hasSuffix("/") ? path : path + "/"
+            return candidatePaths.contains { $0 != path && $0.hasPrefix(prefix) }
+        })
+        var effectiveLocks = locked
+        for path in coarseParentPaths where effectiveLocks[path] == nil {
+            effectiveLocks[path] = .notCleanable(reason: NSLocalizedString(
+                "This parent contains separately judged cleanup candidates. Select the verified child items instead.",
+                comment: "coarse cleanup parent lock"))
+        }
+        selection = CleanSelection(list: canonicalList, locked: effectiveLocks)
 
         let snapshotItems = Dictionary(
             snapshot.items.map { ($0.identity.path, $0.identity) },
@@ -190,22 +203,34 @@ final class CleanupPlanStore: ObservableObject {
                     sizeBytes: item.sizeBytes, sizeText: item.sizeText,
                     itemCount: item.itemCount, displayName: item.displayName,
                     abbreviatedPath: item.abbreviatedPath,
-                    locked: locked[item.path] != nil)
+                    locked: effectiveLocks[item.path] != nil)
             }
         }
         pathToCandidateId = Dictionary(candidates.map { ($0.path, $0.id) },
                                        uniquingKeysWith: { first, _ in first })
         recommendations = Dictionary(candidates.map { candidate in
-            let disposition: CleanupRecommendationDisposition = candidate.locked ? .keep : .delete
-            let reason = candidate.locked
-                ? Self.lockReasonText(locked[candidate.path])
-                : NSLocalizedString("The deterministic scanner classified this as removable cache data.", comment: "")
+            let scannerDisposition: CleanupRecommendationDisposition = candidate.locked ? .keep : .delete
+            let policy = policyDisposition(proposed: scannerDisposition, candidate: candidate)
+            let disposition = policy.disposition
+            let reason = effectiveLocks[candidate.path].map(Self.lockReasonText)
+                ?? policy.reason
+                ?? NSLocalizedString("The deterministic scanner classified this as removable cache data.", comment: "")
             return (candidate.id, CleanupCandidateRecommendation(
                 origin: .scanner, disposition: disposition, reason: reason,
-                consequence: CleanReviewView.consequence(for: candidate.category),
+                consequence: policy.consequence ?? CleanReviewView.consequence(for: candidate.category),
                 confidence: nil, evidence: [], agentRunId: nil))
         }, uniquingKeysWith: { first, _ in first })
-        selectedCandidateId = candidates.first?.id
+        if var staged = selection {
+            for candidate in candidates
+            where recommendation(for: candidate.id).disposition != .delete
+                && staged.isTicked(candidate.path) {
+                staged.toggle(candidate.path)
+            }
+            selection = staged
+        }
+        // Start with the plan-wide judgment. A row becomes the inspector focus
+        // only after the user explicitly selects it.
+        selectedCandidateId = nil
         agentState = hasAgentConsent ? .idle : .consentRequired
     }
 
@@ -243,7 +268,7 @@ final class CleanupPlanStore: ObservableObject {
                 // without pretending that it represents a percentage.
                 try await Task.sleep(nanoseconds: 240_000_000)
                 guard !Task.isCancelled else { return }
-                self?.apply(analysis, runId: runId, baseRevision: baseRevision)
+                self?.apply(analysis, runId: runId)
             } catch {
                 guard !Task.isCancelled else { return }
                 self?.finishDegraded(error, runId: runId)
@@ -259,6 +284,7 @@ final class CleanupPlanStore: ObservableObject {
         selection.toggle(candidate.path)
         self.selection = selection
         userOverrides.insert(id)
+        if selection.selectedCount == 0 { selectedCandidateId = nil }
         revision += 1
     }
 
@@ -271,16 +297,21 @@ final class CleanupPlanStore: ObservableObject {
         }
         guard !targets.isEmpty else { return }
         let shouldSelect = targets.contains { !selection.isTicked($0.path) }
-        for candidate in targets where selection.isTicked(candidate.path) != shouldSelect {
-            selection.toggle(candidate.path)
+        for candidate in targets {
             userOverrides.insert(candidate.id)
+            if selection.isTicked(candidate.path) != shouldSelect {
+                selection.toggle(candidate.path)
+            }
         }
         self.selection = selection
         revision += 1
     }
 
     func selectAll() { setAll(selected: true) }
-    func deselectAll() { setAll(selected: false) }
+    func deselectAll() {
+        setAll(selected: false)
+        selectedCandidateId = nil
+    }
 
     func categoryState(for candidates: [CleanupPlanCandidate]) -> CleanSelection.CategoryState {
         let tickable = candidates.filter { !$0.locked }
@@ -316,17 +347,59 @@ final class CleanupPlanStore: ObservableObject {
     var totalCount: Int { selection?.totalCount ?? candidates.count }
     var selectedBytes: Int64 { selection?.selectedBytes ?? 0 }
 
+    func recommendationCount(for disposition: CleanupRecommendationDisposition) -> Int {
+        candidates.filter { recommendation(for: $0.id).disposition == disposition }.count
+    }
+
+    func recommendationBytes(for disposition: CleanupRecommendationDisposition) -> Int64 {
+        candidates.filter { recommendation(for: $0.id).disposition == disposition }
+            .reduce(0) { $0 + $1.sizeBytes }
+    }
+
+    /// Program-derived copy for the overview and completion card. The model's
+    /// prose is useful context, but it is not allowed to invent authoritative
+    /// counts or bytes.
+    var overallRecommendationText: String {
+        let deleteCount = recommendationCount(for: .delete)
+        let keepCount = recommendationCount(for: .keep)
+        let intentCount = recommendationCount(for: .humanIntentRequired)
+        return String(
+            format: NSLocalizedString("Reviewed %d candidates. Recommend cleaning %d (%@), keeping %d (%@), and leaving %d (%@) for your decision.", comment: "derived cleanup Agent summary"),
+            candidates.count,
+            deleteCount, Fmt.bytes(recommendationBytes(for: .delete)),
+            keepCount, Fmt.bytes(recommendationBytes(for: .keep)),
+            intentCount, Fmt.bytes(recommendationBytes(for: .humanIntentRequired)))
+    }
+
     var canUseAgentCTA: Bool {
         if case .ready = agentState { return userOverrides.isEmpty }
         return false
+    }
+
+    var canConfirmPlan: Bool {
+        guard selectedCount > 0 else { return false }
+        switch agentState {
+        case .analyzing, .degraded:
+            return false
+        default:
+            return true
+        }
     }
 
     var sections: [CleanupDecisionSection] {
         let order: [CleanupRecommendationDisposition] = [.delete, .keep, .humanIntentRequired]
         return order.flatMap { disposition in
             let matching = candidates.filter { recommendation(for: $0.id).disposition == disposition }
+            var categoryOrder: [String] = []
+            var grouped: [String: [CleanupPlanCandidate]] = [:]
+            for candidate in matching {
+                if grouped[candidate.category] == nil { categoryOrder.append(candidate.category) }
+                grouped[candidate.category, default: []].append(candidate)
+            }
             let categories: [[CleanupPlanCandidate]] = CleanImpactRanker.sorted(
-                Dictionary(grouping: matching, by: \.category).map { (category: $0.key, value: $0.value) })
+                categoryOrder.compactMap { category in
+                    grouped[category].map { (category: category, value: $0) }
+                })
             return categories.map { candidates -> CleanupDecisionSection in
                 CleanupDecisionSection(disposition: disposition,
                                        category: candidates[0].category,
@@ -335,7 +408,7 @@ final class CleanupPlanStore: ObservableObject {
         }
     }
 
-    private func apply(_ analysis: CleanupAgentAnalysis, runId: UUID, baseRevision: Int) {
+    private func apply(_ analysis: CleanupAgentAnalysis, runId: UUID) {
         guard currentAgentRunId == runId else { return }
         let known = Set(candidates.map(\.id))
         var seen = Set<String>()
@@ -344,20 +417,28 @@ final class CleanupPlanStore: ObservableObject {
 
         for proposal in analysis.recommendations {
             guard known.contains(proposal.candidateId), seen.insert(proposal.candidateId).inserted,
-                  !proposal.reason.trimmingCharacters(in: .whitespacesAndNewlines).isEmpty else { continue }
+                  !proposal.reason.trimmingCharacters(in: .whitespacesAndNewlines).isEmpty,
+                  !proposal.consequence.trimmingCharacters(in: .whitespacesAndNewlines).isEmpty,
+                  !proposal.evidence.isEmpty else { continue }
             let candidate = candidates.first { $0.id == proposal.candidateId }
-            let disposition = candidate?.locked == true ? .keep : proposal.disposition
+            let policy: (disposition: CleanupRecommendationDisposition, reason: String?, consequence: String?) = candidate.map {
+                policyDisposition(proposed: proposal.disposition, candidate: $0)
+            } ?? (disposition: proposal.disposition, reason: nil, consequence: nil)
+            let disposition = policy.disposition
             recommendations[proposal.candidateId] = CleanupCandidateRecommendation(
                 origin: .agent, disposition: disposition,
-                reason: proposal.reason, consequence: proposal.consequence,
+                reason: policy.reason ?? proposal.reason,
+                consequence: policy.consequence ?? proposal.consequence,
                 confidence: min(max(proposal.confidence, 0), 1),
                 evidence: Array(proposal.evidence.prefix(12)), agentRunId: runId)
             accepted += 1
 
-            // A recommendation may set the staged selection only when it was
-            // computed for the current revision and the user has not touched
-            // this candidate. Explanations can still arrive after an edit.
-            guard baseRevision == revision, !userOverrides.contains(proposal.candidateId),
+            // Merge at candidate granularity. Editing one row while Codex is
+            // working protects that row only; unrelated rows still receive
+            // their Agent selection. The run ID already rejects results from
+            // an obsolete/reloaded plan, so a global revision gate would make
+            // one user edit leave scanner checkboxes under Agent judgments.
+            guard !userOverrides.contains(proposal.candidateId),
                   let candidate, !candidate.locked, var value = nextSelection else { continue }
             let shouldSelect = disposition == .delete
             if value.isTicked(candidate.path) != shouldSelect { value.toggle(candidate.path) }
@@ -428,6 +509,44 @@ final class CleanupPlanStore: ObservableObject {
         }
         self.selection = selection
         revision += 1
+    }
+
+    private func policyDisposition(
+        proposed: CleanupRecommendationDisposition,
+        candidate: CleanupPlanCandidate
+    ) -> (disposition: CleanupRecommendationDisposition, reason: String?, consequence: String?) {
+        if candidate.locked {
+            return (.keep, nil, nil)
+        }
+
+        // A parent that contains independently judged candidates is not one
+        // homogeneous cleanup unit. Preserve it and let the leaf candidates
+        // carry the decisions. This prevents a kept child from being deleted
+        // through an Agent-selected ancestor.
+        let prefix = candidate.path.hasSuffix("/") ? candidate.path : candidate.path + "/"
+        if proposed == .delete,
+           candidates.contains(where: { $0.id != candidate.id && $0.path.hasPrefix(prefix) }) {
+            return (
+                .keep,
+                NSLocalizedString("Burrow kept this parent folder because the scan contains child items with their own judgments. Clean the verified child items instead.", comment: "coarse cleanup candidate policy"),
+                NSLocalizedString("Keeping the parent protects unlisted or differently judged content inside it.", comment: "coarse cleanup candidate consequence")
+            )
+        }
+
+        // Large local models are technically rebuildable but carry offline,
+        // bandwidth, and deliberate-download intent. Codex may identify them
+        // as zombies; the user makes the final inclusion decision.
+        let lowerPath = candidate.path.lowercased()
+        let modelSignals = ["huggingface", "whisper", "ollama", "qwen", "/models/"]
+        if proposed == .delete, candidate.sizeBytes >= 512 * 1_024 * 1_024,
+           modelSignals.contains(where: { lowerPath.contains($0) }) {
+            return (
+                .humanIntentRequired,
+                NSLocalizedString("Codex identified this as an unused local model cache. Burrow leaves large offline models for you to include or keep.", comment: "large model cleanup policy"),
+                NSLocalizedString("Cleaning it frees substantial space, but using that model again requires downloading or rebuilding it.", comment: "large model cleanup consequence")
+            )
+        }
+        return (proposed, nil, nil)
     }
 
     private static func candidateId(planId: UUID, path: String, identityToken: String) -> String {

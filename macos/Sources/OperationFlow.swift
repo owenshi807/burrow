@@ -392,7 +392,10 @@ final class OperationFlow<Report: Sendable>: ObservableObject {
                     // not by a view-level "elevated + nonzero + no output" guess.
                     guard !self.cancelRequested else { return }
                     self.reactivateIfElevated(op)
-                    self.report = op.reduce(lines)
+                    // No privileged operation ran. In particular, a cleanup
+                    // reducer must not turn pre-launch skip markers or an
+                    // empty transcript into a success receipt.
+                    self.report = op.cleanupPlan == nil ? op.reduce(lines) : nil
                     self.rawLog = lines.joined(separator: "\n")
                     self.state = .finished(.failed(NSLocalizedString("authorization cancelled", comment: "")))
                     if op.label != nil { self.center.end(id, success: false) }
@@ -580,6 +583,8 @@ struct SystemProcessPort: ProcessPort {
                 // check said no. Carry the reason into the transcript.
                 let command: ValidatedElevatedCommand
                 let logSink: PrivilegedLogSink
+                var effectiveCleanupPlan = spec.cleanupPlan
+                var launchSkippedPaths: [String] = []
                 do {
                     guard let invokingUser = spec.invokingUser else {
                         throw ElevatedSetupError.noInvokingUser
@@ -587,8 +592,19 @@ struct SystemProcessPort: ProcessPort {
                     command = try ValidatedElevatedCommand.prepare(
                         executable: spec.executable, invokingUser: invokingUser,
                         requireCurrentBundle: spec.requiresCurrentBundle)
-                    guard spec.cleanupPlan?.validateForLaunch() != false else {
-                        throw ElevatedSetupError.staleCleanupPlan
+                    if let plan = spec.cleanupPlan {
+                        let runningApps: [CleanLock.RunningApp]
+                        if Thread.isMainThread {
+                            runningApps = CleanLock.runningApps()
+                        } else {
+                            runningApps = DispatchQueue.main.sync { CleanLock.runningApps() }
+                        }
+                        guard let revalidated = plan.revalidatedForLaunch(
+                            runningApps: runningApps) else {
+                            throw ElevatedSetupError.staleCleanupPlan
+                        }
+                        effectiveCleanupPlan = revalidated.plan
+                        launchSkippedPaths = revalidated.skippedPaths
                     }
                     logSink = try PrivilegedLogSink.make()
                 } catch {
@@ -609,7 +625,15 @@ struct SystemProcessPort: ProcessPort {
                 let script = MoleCLI.elevatedScript(command: command,
                                                     args: spec.arguments,
                                                     logSink: logSink,
-                                                    cleanupPlan: spec.cleanupPlan)
+                                                    cleanupPlan: effectiveCleanupPlan)
+                if !launchSkippedPaths.isEmpty {
+                    let skipped = launchSkippedPaths
+                    streamQ.async {
+                        for path in skipped {
+                            emit("BURROW_SKIPPED_CHANGED\t\(path)\n")
+                        }
+                    }
+                }
                 t.executableURL = URL(fileURLWithPath: "/usr/bin/osascript")
                 t.arguments = ["-e", script]
                 t.standardOutput = outPipe

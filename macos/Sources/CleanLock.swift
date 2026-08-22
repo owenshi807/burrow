@@ -12,7 +12,7 @@ import Foundation
 import AppKit
 
 enum CleanLock {
-    struct RunningApp {
+    struct RunningApp: Sendable {
         let bundleID: String
         let name: String
     }
@@ -33,16 +33,34 @@ enum CleanLock {
     /// exactly the app's name (Application Support/<Name>/…).
     static func lockReason(for path: String,
                            running: [RunningApp]) -> CleanSelection.LockReason? {
-        let components = Set((path as NSString).pathComponents)
+        let components = (path as NSString).pathComponents.filter { $0 != "/" }
+        let normalized = components.map(normalize)
+        var identityKeys = Set(normalized.filter { !$0.isEmpty })
+        // Some products split a display name into vendor/product directories,
+        // e.g. `Application Support/Google/Chrome` for “Google Chrome”.
+        // Compare short adjacent windows as well as literal components.
+        for start in normalized.indices {
+            for length in 2...3 where start + length <= normalized.count {
+                identityKeys.insert(normalized[start..<(start + length)].joined())
+            }
+        }
         for app in running {
-            if !app.bundleID.isEmpty, components.contains(app.bundleID) {
+            let bundleKey = normalize(app.bundleID)
+            if !bundleKey.isEmpty, identityKeys.contains(bundleKey) {
                 return .appOpen(appName: app.name)
             }
-            if components.contains(app.name) {
+            let nameKey = normalize(app.name)
+            if !nameKey.isEmpty, identityKeys.contains(nameKey) {
                 return .appOpen(appName: app.name)
             }
         }
         return nil
+    }
+
+    private static func normalize(_ value: String) -> String {
+        String(value.lowercased().unicodeScalars.filter {
+            CharacterSet.alphanumerics.contains($0)
+        })
     }
 
     /// The full map for a parsed preview.

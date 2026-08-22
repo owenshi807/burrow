@@ -347,15 +347,6 @@ struct CleanView: View {
     /// their identities at every execution boundary.
     private func confirmClean(_ selection: CleanSelection) {
         guard let snapshot = reviewSnapshot else { return }
-        if Date() > snapshot.expiresAt {
-            let alert = NSAlert()
-            alert.messageText = NSLocalizedString("This preview is stale", comment: "")
-            alert.informativeText = NSLocalizedString("This review session has expired. Rescan to create a new path-verified cleanup plan, then clean.", comment: "")
-            alert.addButton(withTitle: NSLocalizedString("Rescan", comment: ""))
-            alert.addButton(withTitle: NSLocalizedString("Cancel", comment: ""))
-            if alert.runModalQuiet() == .alertFirstButtonReturn { screen = .hero; startDry() }
-            return
-        }
         if Store.cacheRemovalMode == .trash {
             trashTicked(selection, snapshot: snapshot)
         } else {
@@ -369,15 +360,22 @@ struct CleanView: View {
         // Refused entries can never reach a plan — `plan(selectedPaths:)`
         // rejects any path it didn't capture, which would fail the whole run.
         let refused = Set(snapshot.skipped.map(\.path))
-        let paths = selection.list.categories.flatMap(\.items).map(\.path)
+        let selectedPaths = selection.list.categories.flatMap(\.items).map(\.path)
             .filter { selection.isTicked($0) && !refused.contains($0) }
+        // A review can stay open for as long as the user needs. Re-check live
+        // app ownership at the click boundary and remove newly active entries
+        // from this run instead of expiring the whole snapshot.
+        let newlyActive = CleanLock.lockedPaths(
+            in: selection.list, running: CleanLock.runningApps())
+        let activePaths = selectedPaths.filter { newlyActive[$0] != nil }
+        let paths = selectedPaths.filter { newlyActive[$0] == nil }
         let preparation: CleanupSnapshot.PlanPreparation
         do {
             preparation = try snapshot.preparePlan(selectedPaths: paths)
         } catch {
             let alert = NSAlert()
             alert.messageText = NSLocalizedString("The reviewed files changed", comment: "")
-            alert.informativeText = String(format: NSLocalizedString("Nothing was cleaned. Rescan before trying again. (%@)", comment: ""), error.localizedDescription)
+            alert.informativeText = String(format: NSLocalizedString("Nothing was cleaned. Every selected item changed, became active, or is no longer available. Review the scan and try again. (%@)", comment: ""), error.localizedDescription)
             alert.alertStyle = .warning
             alert.runModalQuiet()
             return
@@ -396,7 +394,7 @@ struct CleanView: View {
                 (category.name, category.items.filter { executablePaths.contains($0.path) })
             }
             .filter { !$0.1.isEmpty }
-        let changed = preparation.skippedChangedPaths
+        let changed = Array(Set(preparation.skippedChangedPaths + activePaths)).sorted()
         let cleanedBytes = cleaned.flatMap(\.1).reduce(Int64(0)) { $0 + $1.sizeBytes }
         let cleanedCount = cleaned.reduce(0) { $0 + $1.1.count }
         let confirmation = NSAlert()
@@ -404,8 +402,8 @@ struct CleanView: View {
             format: NSLocalizedString("Permanently clean %d items (%@)?", comment: "final permanent cleanup confirmation"),
             cleanedCount,
             Fmt.bytes(cleanedBytes))
-        confirmation.informativeText = NSLocalizedString(
-            "The selected cache files will be deleted immediately and cannot be recovered. Burrow will clean only the reviewed paths shown in this plan.",
+        confirmation.informativeText = changedItemsNotice(changed) + NSLocalizedString(
+            "The remaining cache files will be deleted immediately and cannot be recovered. Burrow will clean only the unchanged, inactive paths in this verified plan.",
             comment: "final permanent cleanup warning")
         confirmation.alertStyle = .critical
         confirmation.addButton(withTitle: NSLocalizedString("Permanently clean", comment: "final permanent cleanup action"))
@@ -417,20 +415,38 @@ struct CleanView: View {
             label: NSLocalizedString("Cleaning reviewed caches", comment: ""),
             executable: .path("/usr/bin/find"), arguments: [], elevated: true,
             cleanupPlan: plan,
-            reduce: { _ in
-                var groups = cleaned.map { name, items in
+            reduce: { lines in
+                let runtimeSkipped = CleanupRuntimeTranscript.paths(
+                    in: lines, prefix: CleanupRuntimeTranscript.skippedPrefix)
+                let runtimeCleaned = CleanupRuntimeTranscript.paths(
+                    in: lines, prefix: CleanupRuntimeTranscript.cleanedPrefix)
+                // The osascript route emits one success marker per removed
+                // root. The privileged helper emits only skip markers, so an
+                // empty success set there means "plan minus skips", not zero.
+                let markerMode = !runtimeCleaned.isEmpty
+                let actual = cleaned.compactMap { name, items -> (String, [CleanList.Item])? in
+                    let kept = items.filter {
+                        !runtimeSkipped.contains($0.path)
+                            && (!markerMode || runtimeCleaned.contains($0.path))
+                    }
+                    return kept.isEmpty ? nil : (name, kept)
+                }
+                let allChanged = Array(Set(changed).union(runtimeSkipped)).sorted()
+                let actualBytes = actual.flatMap(\.1).reduce(Int64(0)) { $0 + $1.sizeBytes }
+                let actualCount = actual.reduce(0) { $0 + $1.1.count }
+                var groups = actual.map { name, items in
                     TaskGroup(title: name,
                               items: items.map { TaskItem(marker: .ok, text: $0.path) })
                 }
-                if !changed.isEmpty {
+                if !allChanged.isEmpty {
                     groups.append(TaskGroup(
                         title: NSLocalizedString("Changed since scan", comment: "cleanup result group"),
-                        items: changed.map { TaskItem(marker: .info, text: $0) }))
+                        items: allChanged.map { TaskItem(marker: .info, text: $0) }))
                 }
                 return (groups: groups,
-                        summary: TaskSummary(space: Fmt.bytes(cleanedBytes),
-                                             items: "\(cleanedCount)",
-                                             categories: "\(cleaned.count)"))
+                        summary: TaskSummary(space: Fmt.bytes(actualBytes),
+                                             items: "\(actualCount)",
+                                             categories: "\(actual.count)"))
             },
             notifyOnEnd: true))
     }
@@ -444,8 +460,12 @@ struct CleanView: View {
     /// — it lands in Burrow's Activity log instead.
     private func trashTicked(_ selection: CleanSelection, snapshot: CleanupSnapshot) {
         let refused = Set(snapshot.skipped.map(\.path))
-        let paths = selection.list.categories.flatMap(\.items).map(\.path)
+        let selectedPaths = selection.list.categories.flatMap(\.items).map(\.path)
             .filter { selection.isTicked($0) && !refused.contains($0) }
+        let newlyActive = CleanLock.lockedPaths(
+            in: selection.list, running: CleanLock.runningApps())
+        let activePaths = selectedPaths.filter { newlyActive[$0] != nil }
+        let paths = selectedPaths.filter { newlyActive[$0] == nil }
         // Refuse anything that didn't come from the dry-run enumeration.
         assert(Set(paths).isSubset(of: Set(selection.list.categories.flatMap(\.items).map(\.path))))
         let preparation: CleanupSnapshot.PlanPreparation
@@ -454,19 +474,20 @@ struct CleanView: View {
         } catch {
             let changed = NSAlert()
             changed.messageText = NSLocalizedString("The reviewed files changed", comment: "")
-            changed.informativeText = NSLocalizedString("Nothing was moved. Rescan before trying again.", comment: "")
+            changed.informativeText = NSLocalizedString("Nothing was moved. Every selected item changed, became active, or is no longer available.", comment: "")
             changed.alertStyle = .warning
             changed.runModalQuiet()
             return
         }
         let plan = preparation.plan
+        let changedPaths = Array(Set(preparation.skippedChangedPaths + activePaths)).sorted()
         let executablePaths = Set(plan.items.map(\.identity.path))
         let actualItems = selection.list.categories.flatMap(\.items)
             .filter { executablePaths.contains($0.path) }
         let total = actualItems.reduce(Int64(0)) { $0 + $1.sizeBytes }
         let alert = NSAlert()
         alert.messageText = String(format: NSLocalizedString("Move %d items (%@) to the Trash?", comment: ""), actualItems.count, Fmt.bytes(total))
-        alert.informativeText = NSLocalizedString("They stay recoverable until you empty the Trash. Space frees when it empties; this run won't appear in `mo history`.", comment: "")
+        alert.informativeText = changedItemsNotice(changedPaths) + NSLocalizedString("The remaining items stay recoverable until you empty the Trash. Space frees when it empties; this run won't appear in `mo history`.", comment: "")
         alert.addButton(withTitle: NSLocalizedString("Move to Trash", comment: ""))
         alert.addButton(withTitle: NSLocalizedString("Cancel", comment: ""))
         guard alert.runModalQuiet() == .alertFirstButtonReturn else { return }
@@ -478,7 +499,7 @@ struct CleanView: View {
         DispatchQueue.global(qos: .userInitiated).async {
             let result = CleanupExecutor.moveToTrash(plan)
             let moved = result.moved
-            let skipped = preparation.skippedChangedPaths.count + result.skipped
+            let skipped = changedPaths.count + result.skipped
             let failed = result.failed
             DispatchQueue.main.async {
                 OperationCenter.shared.end(opID, success: failed == 0,
@@ -493,6 +514,21 @@ struct CleanView: View {
                 dryFlow.reset()
             }
         }
+    }
+
+    /// Explain click-time narrowing before the irreversible confirmation.
+    /// The user may spend an hour reviewing a large model cache; elapsed time
+    /// is not a risk by itself. A changed identity or newly active app is.
+    private func changedItemsNotice(_ paths: [String]) -> String {
+        guard !paths.isEmpty else { return "" }
+        let names = paths.prefix(3).map { ($0 as NSString).lastPathComponent }
+            .joined(separator: ", ")
+        let suffix = paths.count > 3
+            ? String(format: NSLocalizedString(" and %d more", comment: "changed cleanup entries"), paths.count - 3)
+            : ""
+        return String(
+            format: NSLocalizedString("%d selected items changed or became active and will not be cleaned: %@%@.\n\n", comment: "click-time cleanup revalidation"),
+            paths.count, names, suffix)
     }
 
     // MARK: - Real-run screen (status + receipt, the pre-1.4 layout)

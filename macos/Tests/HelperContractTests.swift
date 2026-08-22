@@ -657,7 +657,8 @@ final class HelperReviewedRequestTests: XCTestCase {
 
     private func request(_ operation: HelperOperation, paths: [String]) -> HelperRequest {
         HelperRequest(operation: operation, operationID: UUID().uuidString,
-                      clientBuild: "1", invokingUser: claim(), reviewedPaths: paths)
+                      clientBuild: "1", invokingUser: claim(), reviewedPaths: paths,
+                      reviewedValidatedAt: operation == .cleanReviewed ? Date() : nil)
     }
 
     func testReviewedPathsRoundTripAcrossTheWire() throws {
@@ -672,11 +673,43 @@ final class HelperReviewedRequestTests: XCTestCase {
                        .invalidReviewedPaths)
     }
 
+    func testCleanReviewedRequiresANonFutureBoundary() {
+        let now = Date(timeIntervalSince1970: 10_000)
+        let path = "/Users/henry/Library/Caches/a"
+        let base = HelperRequest(operation: .cleanReviewed,
+                                 operationID: UUID().uuidString,
+                                 clientBuild: "1", invokingUser: claim(),
+                                 reviewedPaths: [path])
+        XCTAssertEqual(base.validate(expectedBuild: "1", now: now), .invalidReviewedPaths)
+        let old = HelperRequest(operation: .cleanReviewed,
+                                operationID: UUID().uuidString,
+                                clientBuild: "1", invokingUser: claim(),
+                                reviewedPaths: [path],
+                                reviewedValidatedAt: now.addingTimeInterval(-86_400))
+        XCTAssertNil(old.validate(expectedBuild: "1", now: now),
+                     "an old boundary narrows the eligible tree; it does not expire the review")
+        let future = HelperRequest(operation: .cleanReviewed,
+                                   operationID: UUID().uuidString,
+                                   clientBuild: "1", invokingUser: claim(),
+                                   reviewedPaths: [path],
+                                   reviewedValidatedAt: now.addingTimeInterval(1))
+        XCTAssertEqual(future.validate(expectedBuild: "1", now: now), .invalidReviewedPaths)
+    }
+
     /// Paths on an operation that takes none means the caller and the contract
     /// disagree; refuse rather than silently ignoring them.
     func testOtherOperationsRefusePathsRatherThanIgnoringThem() {
         XCTAssertEqual(request(.clean, paths: ["/Users/henry/x"]).validate(expectedBuild: "1"),
                        .invalidReviewedPaths)
+    }
+
+
+    func testOtherOperationsRefuseReviewedBoundaryRatherThanIgnoringIt() {
+        let request = HelperRequest(operation: .clean,
+                                    operationID: UUID().uuidString,
+                                    clientBuild: "1", invokingUser: claim(),
+                                    reviewedValidatedAt: Date())
+        XCTAssertEqual(request.validate(expectedBuild: "1"), .invalidReviewedPaths)
     }
 
     /// The recogniser maps engine argv onto operations. A reviewed cleanup has
