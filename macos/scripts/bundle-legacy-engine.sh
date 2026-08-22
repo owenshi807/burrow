@@ -40,4 +40,16 @@ test -f "$APP_CACHES_SCRIPT"
 /usr/bin/grep -A 1 '^clean_final_cut_pro_generated_caches() {' "$APP_CACHES_SCRIPT" \
     | /usr/bin/grep -q '^    return 0$'
 
+# Installer discovery walks several user-controlled folders. A single
+# unavailable File Provider directory in Downloads can leave BSD find blocked
+# in open() forever, which in turn leaves Burrow's native screen spinning with
+# no result. Bound every scan root independently: healthy roots still produce
+# candidates, while an unavailable root fails closed after 15 seconds.
+INSTALLER_SCRIPT="$TARGET_RESOURCES/engine/bin/installer.sh"
+test -f "$INSTALLER_SCRIPT"
+/usr/bin/perl -0pi -e 's/fd --no-ignore --hidden/run_with_timeout "\${MOLE_INSTALLER_PATH_TIMEOUT_SEC:-15}" fd --no-ignore --hidden/g' "$INSTALLER_SCRIPT"
+/usr/bin/perl -0pi -e 's/find "\$path" -maxdepth/run_with_timeout "\${MOLE_INSTALLER_PATH_TIMEOUT_SEC:-15}" find "\$path" -maxdepth/g' "$INSTALLER_SCRIPT"
+/usr/bin/grep -q 'run_with_timeout "${MOLE_INSTALLER_PATH_TIMEOUT_SEC:-15}" fd --no-ignore' "$INSTALLER_SCRIPT"
+/usr/bin/grep -q 'run_with_timeout "${MOLE_INSTALLER_PATH_TIMEOUT_SEC:-15}" find "$path" -maxdepth' "$INSTALLER_SCRIPT"
+
 echo "bundled legacy Burrow runtime -> $TARGET_RESOURCES (conductor + engine/mole)"
