@@ -227,7 +227,18 @@ final class CleanupAgentPlanTests: XCTestCase {
 
         XCTAssertEqual(store.sections.filter { $0.disposition == .delete }.map(\.category),
                        ["Applications", "Developer tools", "App caches", "Browsers"])
-        XCTAssertTrue(store.overallRecommendationText.contains("Reviewed 4 candidates"))
+        let localizedSummary = String(
+            format: NSLocalizedString(
+                "Reviewed %d candidates. Recommend cleaning %d (%@), keeping %d (%@), and leaving %d (%@) for your decision.",
+                comment: "derived cleanup Agent summary"),
+            4,
+            store.recommendationCount(for: .delete),
+            Fmt.bytes(store.recommendationBytes(for: .delete)),
+            store.recommendationCount(for: .keep),
+            Fmt.bytes(store.recommendationBytes(for: .keep)),
+            store.recommendationCount(for: .humanIntentRequired),
+            Fmt.bytes(store.recommendationBytes(for: .humanIntentRequired)))
+        XCTAssertEqual(store.overallRecommendationText, localizedSummary)
         XCTAssertFalse(store.overallRecommendationText.contains("999"),
                        "authoritative overview arithmetic is derived, never copied from model prose")
     }
@@ -360,6 +371,41 @@ final class CleanupAgentPlanTests: XCTestCase {
         XCTAssertTrue(principles.contains("does not by itself prove an external consumer"))
         XCTAssertTrue(principles.contains("natural child boundaries"))
         XCTAssertTrue(principles.contains("consumerBasis=external_current"))
+    }
+
+    func testCleanupAgentOutputLanguageFollowsBurrowLanguageOverride() {
+        XCTAssertEqual(
+            CleanupAgentJudgmentPrinciples.responseLanguage(
+                appLanguage: "zh-Hans", preferredLocalization: "en"),
+            "Simplified Chinese (简体中文)")
+        XCTAssertEqual(
+            CleanupAgentJudgmentPrinciples.responseLanguage(
+                appLanguage: "zh-Hant", preferredLocalization: "en"),
+            "Traditional Chinese (繁體中文，台灣用語)")
+        XCTAssertEqual(
+            CleanupAgentJudgmentPrinciples.responseLanguage(
+                appLanguage: "", preferredLocalization: "ru"),
+            "Russian (русский)")
+        XCTAssertEqual(
+            CleanupAgentJudgmentPrinciples.responseLanguage(
+                appLanguage: "en", preferredLocalization: "zh-Hans"),
+            "English")
+    }
+
+    func testEveryCleanupAgentStageReceivesTheUserFacingLanguage() {
+        let language = "Simplified Chinese (简体中文)"
+        let triage = CleanupAgentJudgmentPrinciples.triagePrompt(
+            inputJSON: "{}", responseLanguage: language)
+        let recommendation = CleanupAgentJudgmentPrinciples.prompt(
+            inputJSON: "{}", triageJSON: "[]", targetCandidateIDs: [],
+            responseLanguage: language)
+        let consistency = CleanupAgentJudgmentPrinciples.consistencyPrompt(
+            payloadJSON: "{}", responseLanguage: language)
+
+        for prompt in [triage, recommendation, consistency] {
+            XCTAssertTrue(prompt.contains(
+                "Write all user-facing text in \(language)."))
+        }
     }
 
     func testCodexRecommendationsAreSplitIntoBoundedStableBatches() {

@@ -44,6 +44,45 @@ final class LocalizationTests: XCTestCase {
         "Uninstall aborted",
     ]
 
+    private static let cleanupReviewKeys = [
+        "Burrow reviewed plan",
+        "Plan-wide judgment",
+        "All scanner candidates · captured just now",
+        "All scanner candidates · captured %d min ago · rechecked at cleanup",
+        "Your %d manual changes are already applied to the staged plan; Codex's original judgment remains visible on each item.",
+        "Select any item to inspect its reason and evidence. You can include a suggested keep or exclude a suggested cleanup; your choice wins.",
+        "Ask Codex to reassess the full scan",
+        "Finished in %@. Candidate mapping and path policy checks passed.",
+        "Reviewed %d candidates. Recommend cleaning %d (%@), keeping %d (%@), and leaving %d (%@) for your decision.",
+        "Agent discovered",
+        "Burrow kept this parent folder because the scan contains child items with their own judgments. Clean the verified child items instead.",
+        "Burrow safety check",
+        "Clean verified plan · %@",
+        "Codex is analyzing",
+        "Codex review incomplete",
+        "Codex review incomplete · Retry",
+        "Consumers",
+        "Evidence and checks · %d",
+        "Inference",
+        "Keeping the parent protects unlisted or differently judged content inside it.",
+        "Lifecycle",
+        "N/A",
+        "Not verified",
+        "Observed",
+        "Ownership",
+        "Recovery",
+        "Relationship",
+        "Scanner baseline",
+        "Scope",
+        "Sensitivity",
+        "This parent contains separately judged cleanup candidates. Select the verified child items instead.",
+        "This protected item is excluded from cleanup. Close the related app or resolve the safety condition, then rescan if you want it reviewed again.",
+        "Triage and deep review in progress",
+        "Unknown",
+        "Verified",
+        "Waiting for Codex analysis",
+    ]
+
     func testTaskReportTextLocalizesOptimizeOutput() throws {
         let bundle = try lprojBundle("zh-Hans")
         XCTAssertEqual(TaskReportText.title("Periodic Maintenance", bundle: bundle), "定期维护")
@@ -76,6 +115,18 @@ final class LocalizationTests: XCTestCase {
 
     func testRussianStringsCoverCoreInterface() throws {
         try assertCoversCoreInterface(language: "ru")
+    }
+
+    func testCleanupReviewCopyFollowsTheSelectedLanguage() throws {
+        for language in ["zh-Hans", "zh-Hant", "ru"] {
+            let strings = try localizedStrings(language)
+            for key in Self.cleanupReviewKeys {
+                let value = try XCTUnwrap(
+                    strings[key], "missing \(language) cleanup Review translation for \(key)")
+                XCTAssertFalse(value.trimmingCharacters(in: .whitespacesAndNewlines).isEmpty)
+                XCTAssertNotEqual(value, key)
+            }
+        }
     }
 
     func testLocalizedResourcesAreStagedInApplicationBundle() throws {
