@@ -116,7 +116,7 @@ final class CleanupAgentPlanTests: XCTestCase {
         store.startAgentAnalysis()
 
         XCTAssertEqual(store.agentProgress?.candidateCount, 2)
-        XCTAssertEqual(store.agentProgress?.phase, .investigating)
+        XCTAssertEqual(store.agentProgress?.phase, .routing)
         try await waitUntilProgress(store, phase: .validating)
         try await waitUntilReady(store)
 
@@ -144,10 +144,50 @@ final class CleanupAgentPlanTests: XCTestCase {
         guard case .degraded(_, let reason) = store.agentState else {
             return XCTFail("timeout must become a visible degraded state")
         }
-        XCTAssertTrue(reason.contains("20"))
+        XCTAssertEqual(
+            reason,
+            NSLocalizedString(
+                "Codex did not finish within the analysis time limit. Nothing was changed. Retry when the Agent is available.",
+                comment: "cleanup Agent timeout"
+            )
+        )
         XCTAssertEqual(store.selectedCount, originalSelectedCount)
         XCTAssertEqual(store.selectedBytes, originalSelectedBytes)
-        XCTAssertEqual(store.agentProgress?.phase, .investigating)
+        XCTAssertEqual(store.agentProgress?.phase, .routing)
+    }
+
+    func testStoppingAgentCancelsRunAndPreservesScannerPlan() async throws {
+        let fixture = try makeFixture()
+        let analyzer = FakeCleanupAnalyzer(delay: 2_000_000_000) { input in
+            CleanupAgentAnalysis(summary: "late", recommendations: input.candidates.map {
+                .init(candidateId: $0.candidateId, disposition: .keep,
+                      reason: "Late.", consequence: "None.", confidence: 1,
+                      evidence: [.init(label: "Filesystem", detail: "Verified")])
+            })
+        }
+        let store = CleanupPlanStore(analyzer: analyzer)
+        store.load(list: fixture.list, snapshot: fixture.snapshot, locked: [:], hasAgentConsent: true)
+        let originalSelectedCount = store.selectedCount
+        let originalSelectedBytes = store.selectedBytes
+
+        store.startAgentAnalysis()
+        store.stopAgentAnalysis()
+
+        guard case .stopped(let agent) = store.agentState else {
+            return XCTFail("stopping must become visible immediately")
+        }
+        XCTAssertEqual(agent, "Test Agent")
+        XCTAssertEqual(store.selectedCount, originalSelectedCount)
+        XCTAssertEqual(store.selectedBytes, originalSelectedBytes)
+        XCTAssertTrue(store.canConfirmPlan)
+
+        try await Task.sleep(nanoseconds: 100_000_000)
+        guard case .stopped = store.agentState else {
+            return XCTFail("a cancelled late result must not overwrite stopped state")
+        }
+        XCTAssertTrue(store.candidates.allSatisfy {
+            store.recommendation(for: $0.id).origin == .scanner
+        })
     }
 
     func testLockedCandidateCannotBeSelectedByAgent() async throws {
@@ -362,6 +402,37 @@ final class CleanupAgentPlanTests: XCTestCase {
         XCTAssertFalse(store.canConfirmPlan)
     }
 
+    func testExplicitIncompleteInvestigationCanOnlyProduceAgentKeep() async throws {
+        let fixture = try makeFixture()
+        let incomplete = CleanupAgentInvestigation(
+            scope: .init(), ownership: .init(state: .unknown, detail: "Owner unavailable."),
+            consumers: .init(state: .unknown, detail: "Consumers unavailable."),
+            lifecycle: .init(), recovery: .init(), sensitivity: .init(),
+            unresolvedGaps: ["No independent consumer record was available."],
+            deepReviewCompleted: false,
+            decisionBasis: .incompleteInvestigation)
+        let analyzer = FakeCleanupAnalyzer(delay: 0) { input in
+            CleanupAgentAnalysis(summary: "Conservative keep", recommendations: input.candidates.map {
+                .init(candidateId: $0.candidateId, disposition: .keep,
+                      reason: "Deletion is not justified by current evidence.",
+                      consequence: "Keeping preserves the current state.", confidence: 0.4,
+                      evidence: [.init(basis: .gap, label: "Consumer check",
+                                       detail: "Independent usage could not be verified.")],
+                      investigation: incomplete)
+            })
+        }
+        let store = CleanupPlanStore(analyzer: analyzer)
+        store.load(list: fixture.list, snapshot: fixture.snapshot, locked: [:], hasAgentConsent: true)
+        store.startAgentAnalysis()
+        try await waitUntilReady(store)
+
+        XCTAssertEqual(store.selectedCount, 0)
+        XCTAssertTrue(store.recommendations.values.allSatisfy {
+            $0.origin == .agent && $0.disposition == .keep
+                && $0.investigation?.decisionBasis == .incompleteInvestigation
+        })
+    }
+
     func testJudgmentContractIsGeneralAndEvidenceDriven() {
         let principles = CleanupAgentJudgmentPrinciples.core
         XCTAssertTrue(principles.contains("No product name, content type, size threshold"))
@@ -371,6 +442,7 @@ final class CleanupAgentPlanTests: XCTestCase {
         XCTAssertTrue(principles.contains("does not by itself prove an external consumer"))
         XCTAssertTrue(principles.contains("natural child boundaries"))
         XCTAssertTrue(principles.contains("consumerBasis=external_current"))
+        XCTAssertTrue(principles.contains("valid conservative keep"))
     }
 
     func testCleanupAgentOutputLanguageFollowsBurrowLanguageOverride() {
@@ -392,20 +464,13 @@ final class CleanupAgentPlanTests: XCTestCase {
             "English")
     }
 
-    func testEveryCleanupAgentStageReceivesTheUserFacingLanguage() {
+    func testCleanupAgentPromptReceivesTheUserFacingLanguage() {
         let language = "Simplified Chinese (简体中文)"
-        let triage = CleanupAgentJudgmentPrinciples.triagePrompt(
-            inputJSON: "{}", responseLanguage: language)
         let recommendation = CleanupAgentJudgmentPrinciples.prompt(
             inputJSON: "{}", triageJSON: "[]", targetCandidateIDs: [],
             responseLanguage: language)
-        let consistency = CleanupAgentJudgmentPrinciples.consistencyPrompt(
-            payloadJSON: "{}", responseLanguage: language)
-
-        for prompt in [triage, recommendation, consistency] {
-            XCTAssertTrue(prompt.contains(
-                "Write all user-facing text in \(language)."))
-        }
+        XCTAssertTrue(recommendation.contains(
+            "Write all user-facing text in \(language)."))
     }
 
     func testCodexRecommendationsAreSplitIntoBoundedStableBatches() {
@@ -1347,21 +1412,26 @@ final class CleanupAgentPlanTests: XCTestCase {
         guard Foundation.ProcessInfo.processInfo.environment["BURROW_RUN_CODEX_INTEGRATION"] == "1" else {
             throw XCTSkip("Set BURROW_RUN_CODEX_INTEGRATION=1 for the authenticated Codex smoke test")
         }
+        let root = FileManager.default.temporaryDirectory
+            .appendingPathComponent("burrow-live-codex-fixture-\(UUID().uuidString)")
+        let cache = root.appendingPathComponent("ExampleEditor/DerivedData", isDirectory: true)
+        try FileManager.default.createDirectory(at: cache, withIntermediateDirectories: true)
+        try Data("generated object fixture".utf8).write(
+            to: cache.appendingPathComponent("example.o"))
+        defer { try? FileManager.default.removeItem(at: root) }
         let input = CleanupAgentAnalysisInput(
             planId: UUID().uuidString, planRevision: 1,
             candidates: [
-                .init(candidateId: "cand-active-asset",
-                      path: "/Applications/ExampleEditor.app/Contents/Resources/assets/current",
-                      category: "Applications", sizeBytes: 2_000_000_000, itemCount: 12,
-                      runningApp: "ExampleEditor", sensitivePathHint: false),
                 .init(candidateId: "cand-old-build",
-                      path: "/private/tmp/ExampleEditor-old-build/DerivedData",
+                      path: cache.path,
                       category: "Developer tools", sizeBytes: 800_000_000, itemCount: 4000,
-                      runningApp: nil, sensitivePathHint: false),
+                      runningApp: nil, sensitivePathHint: false,
+                      deepReviewRequired: true),
             ])
-        let result = try await CodexCleanupAgentAdapter().analyze(input)
-        XCTAssertEqual(Set(result.recommendations.map(\.candidateId)),
-                       Set(input.candidates.map(\.candidateId)))
+        let result = try await CodexCleanupAgentAdapter(softBudget: 85).analyze(input)
+        XCTAssertTrue(CodexCleanupAgentAdapter.hasExactThreeWayCoverage(
+            result, candidates: input.candidates))
+        XCTAssertEqual(result.recommendations.map(\.candidateId), ["cand-old-build"])
         XCTAssertTrue(result.recommendations.allSatisfy { (0...1).contains($0.confidence) })
         XCTAssertTrue(result.recommendations.allSatisfy { !$0.reason.isEmpty })
     }

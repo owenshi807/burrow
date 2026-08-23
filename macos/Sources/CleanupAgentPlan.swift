@@ -235,13 +235,45 @@ struct CleanupAgentAnalysis: Codable, Equatable, Sendable {
     let summary: String
     let recommendations: [CleanupAgentRecommendation]
     let discoveredCandidates: [CleanupAgentDiscoveredCandidate]
+    /// Scanner candidates intentionally left on the deterministic scanner plan.
+    /// These rows are not Agent judgments and must retain scanner provenance.
+    let passThroughCandidateIDs: [String]
+    /// Scanner candidates the Agent could not resolve. The reducer converts
+    /// these rows to an unselected Burrow safety keep.
+    let unresolvedCandidateIDs: [String]
 
     init(summary: String,
          recommendations: [CleanupAgentRecommendation],
-         discoveredCandidates: [CleanupAgentDiscoveredCandidate] = []) {
+         discoveredCandidates: [CleanupAgentDiscoveredCandidate] = [],
+         passThroughCandidateIDs: [String] = [],
+         unresolvedCandidateIDs: [String] = []) {
         self.summary = summary
         self.recommendations = recommendations
         self.discoveredCandidates = discoveredCandidates
+        self.passThroughCandidateIDs = passThroughCandidateIDs
+        self.unresolvedCandidateIDs = unresolvedCandidateIDs
+    }
+
+    private enum CodingKeys: String, CodingKey {
+        case summary
+        case recommendations
+        case discoveredCandidates
+        case passThroughCandidateIDs
+        case unresolvedCandidateIDs
+    }
+
+    init(from decoder: Decoder) throws {
+        let container = try decoder.container(keyedBy: CodingKeys.self)
+        summary = try container.decode(String.self, forKey: .summary)
+        recommendations = try container.decode(
+            [CleanupAgentRecommendation].self, forKey: .recommendations)
+        discoveredCandidates = try container.decodeIfPresent(
+            [CleanupAgentDiscoveredCandidate].self,
+            forKey: .discoveredCandidates) ?? []
+        passThroughCandidateIDs = try container.decodeIfPresent(
+            [String].self, forKey: .passThroughCandidateIDs) ?? []
+        unresolvedCandidateIDs = try container.decodeIfPresent(
+            [String].self, forKey: .unresolvedCandidateIDs) ?? []
     }
 }
 
@@ -338,6 +370,7 @@ struct CleanupDecisionSection: Identifiable, Equatable {
 
 struct CleanupAgentProgress: Equatable {
     enum Phase: Equatable, Hashable {
+        case routing
         case investigating
         case validating
         case completed
@@ -359,7 +392,7 @@ private enum CleanupAgentRunError: LocalizedError {
 
     var errorDescription: String? {
         NSLocalizedString(
-            "Codex did not finish within 20 minutes. Nothing was changed. Retry when the Agent is available.",
+            "Codex did not finish within the analysis time limit. Nothing was changed. Retry when the Agent is available.",
             comment: "cleanup Agent timeout"
         )
     }
@@ -372,6 +405,7 @@ final class CleanupPlanStore: ObservableObject {
         case consentRequired
         case idle
         case analyzing(agent: String)
+        case stopped(agent: String)
         case ready(agent: String, summary: String)
         case degraded(agent: String, reason: String)
     }
@@ -398,7 +432,7 @@ final class CleanupPlanStore: ObservableObject {
     private let discoverySnapshotCapturedHook: () -> Void
 
     init(analyzer: any CleanupAgentAnalyzing = CodexCleanupAgentAdapter(),
-         analysisTimeoutNanoseconds: UInt64 = 1_200_000_000_000,
+         analysisTimeoutNanoseconds: UInt64 = 120_000_000_000,
          discoverySnapshotCapturedHook: @escaping () -> Void = {}) {
         self.analyzer = analyzer
         self.analysisTimeoutNanoseconds = analysisTimeoutNanoseconds
@@ -519,7 +553,7 @@ final class CleanupPlanStore: ObservableObject {
         agentState = .analyzing(agent: analyzer.displayName)
         agentProgress = CleanupAgentProgress(
             startedAt: Date(), candidateCount: candidates.count,
-            phase: .investigating, reviewedCount: nil, finishedAt: nil)
+            phase: .routing, reviewedCount: nil, finishedAt: nil)
         let timeout = analysisTimeoutNanoseconds
         let progressTarget = WeakCleanupPlanStore(self)
         analysisTask = Task { [weak self, analyzer] in
@@ -558,6 +592,20 @@ final class CleanupPlanStore: ObservableObject {
                 self?.finishDegraded(error, runId: runId)
             }
         }
+    }
+
+    /// Stops the active Agent run without discarding or mutating scanner results.
+    /// Invalidating the run id before cancelling prevents a racing late result
+    /// from ever reaching `apply`; the adapter cancellation handler terminates
+    /// every registered Codex child process.
+    func stopAgentAnalysis() {
+        guard case .analyzing = agentState else { return }
+        currentAgentRunId = nil
+        currentAgentRunBaseRevision = nil
+        analysisTask?.cancel()
+        analysisTask = nil
+        agentProgress?.finishedAt = Date()
+        agentState = .stopped(agent: analyzer.displayName)
     }
 
     func selectCandidate(_ id: String) { selectedCandidateId = id }
@@ -653,11 +701,27 @@ final class CleanupPlanStore: ObservableObject {
             deleteCount, Fmt.bytes(recommendationBytes(for: .delete)),
             keepCount, Fmt.bytes(recommendationBytes(for: .keep)),
             intentCount, Fmt.bytes(recommendationBytes(for: .humanIntentRequired)))
+        let scannerPassThroughCount = candidates.filter { candidate in
+            recommendation(for: candidate.id).origin == .scanner
+        }.count
+        let agentJudgmentCount = candidates.filter { candidate in
+            recommendation(for: candidate.id).origin == .agent
+        }.count
+        let safetyKeepCount = candidates.filter { candidate in
+            recommendation(for: candidate.id).origin == .burrowSafety
+        }.count
+        let coverage = scannerPassThroughCount > 0 || safetyKeepCount > 0 ? " " + String(
+            format: NSLocalizedString(
+                "Coverage: the Agent judged %d items, the deterministic scanner retained %d pass-through items, and Burrow safety-kept %d items.",
+                comment: "cleanup Agent routing coverage summary"),
+            agentJudgmentCount,
+            scannerPassThroughCount,
+            safetyKeepCount) : ""
         let conservativeCount = candidates.filter { candidate in
             !candidate.locked && recommendation(for: candidate.id).origin == .burrowSafety
         }.count
-        guard conservativeCount > 0 else { return summary }
-        return summary + " " + String(
+        guard conservativeCount > 0 else { return summary + coverage }
+        return summary + coverage + " " + String(
             format: NSLocalizedString(
                 "Burrow conservatively kept %d items because Codex did not establish a complete deletion basis.",
                 comment: "candidate-level Agent fallback summary"),
@@ -750,15 +814,104 @@ final class CleanupPlanStore: ObservableObject {
             nextSelection = value
         }
 
+        func stageScannerPassThrough(_ candidate: CleanupPlanCandidate) {
+            guard resolved.insert(candidate.id).inserted else { return }
+            // A pass-through is explicitly not an Agent recommendation. Restore
+            // deterministic scanner provenance on retries while preserving the
+            // current checkbox, including any user override made during the run.
+            let scannerDisposition: CleanupRecommendationDisposition = candidate.locked
+                ? .keep : .delete
+            let policy = policyDisposition(proposed: scannerDisposition, candidate: candidate)
+            let lockReason = currentLocks[candidate.path].map(Self.lockReasonText)
+            recommendations[candidate.id] = CleanupCandidateRecommendation(
+                origin: .scanner,
+                disposition: policy.disposition,
+                reason: lockReason ?? policy.reason ?? NSLocalizedString(
+                    "The deterministic scanner classified this as removable cache data.",
+                    comment: "scanner pass-through reason"),
+                consequence: policy.consequence
+                    ?? CleanReviewView.consequence(for: candidate.category),
+                confidence: nil,
+                evidence: [],
+                agentRunId: nil)
+            accepted += 1
+        }
+
         let allProposals = analysis.recommendations + discoveredRecommendations
         let proposedCandidateIDs = Set(allProposals.map(\.candidateId))
         let proposalCounts = Dictionary(grouping: allProposals, by: \.candidateId)
             .mapValues(\.count)
+        let directProposalCounts = Dictionary(
+            grouping: analysis.recommendations, by: \.candidateId).mapValues(\.count)
+        let passThroughCounts = Dictionary(
+            grouping: analysis.passThroughCandidateIDs, by: { $0 }).mapValues(\.count)
+        let unresolvedCounts = Dictionary(
+            grouping: analysis.unresolvedCandidateIDs, by: { $0 }).mapValues(\.count)
+        let scannerCandidateIDs = Set(candidates.lazy
+            .filter { $0.origin == .scanner }.map(\.id))
+        let routedScannerIDs = Set(analysis.recommendations.map(\.candidateId))
+            .union(analysis.passThroughCandidateIDs)
+            .union(analysis.unresolvedCandidateIDs)
+        let hasForeignRoutingID = !routedScannerIDs.subtracting(scannerCandidateIDs).isEmpty
+
+        // Every scanner row must be routed exactly once. Invalid, duplicate,
+        // overlapping, or missing routing can only shrink the deletion plan.
+        // A foreign ID proves the purported partition is not exact, so every
+        // scanner row fails closed rather than trusting a shifted/mixed plan.
+        for candidate in candidates where candidate.origin == .scanner {
+            let proposalCount = directProposalCounts[candidate.id, default: 0]
+            let passThroughCount = passThroughCounts[candidate.id, default: 0]
+            let unresolvedCount = unresolvedCounts[candidate.id, default: 0]
+            let routeCount = [proposalCount, passThroughCount, unresolvedCount]
+                .filter { $0 > 0 }.count
+            let isExactRoute = !hasForeignRoutingID
+                && routeCount == 1
+                && proposalCount <= 1
+                && passThroughCount <= 1
+                && unresolvedCount <= 1
+            guard isExactRoute else {
+                let reason = NSLocalizedString(
+                    "The Agent did not route this item exactly once.",
+                    comment: "invalid Agent routing conservative keep reason")
+                stageSafetyKeep(
+                    candidate,
+                    reason: reason,
+                    consequence: NSLocalizedString(
+                        "Burrow excluded this item from cleanup because its Agent routing was missing, duplicated, or conflicting.",
+                        comment: "invalid Agent routing conservative keep consequence"),
+                    evidence: [CleanupAgentEvidence(
+                        basis: .gap,
+                        label: NSLocalizedString("Agent routing invalid", comment: ""),
+                        detail: reason)],
+                    forceDeselect: true)
+                continue
+            }
+            if passThroughCount == 1 {
+                stageScannerPassThrough(candidate)
+            } else if unresolvedCount == 1 {
+                let reason = NSLocalizedString(
+                    "The Agent could not establish a complete judgment for this item.",
+                    comment: "explicit unresolved Agent route reason")
+                stageSafetyKeep(
+                    candidate,
+                    reason: reason,
+                    consequence: NSLocalizedString(
+                        "Burrow excluded this unresolved item from cleanup. You can inspect it manually or ask the Agent to reassess it.",
+                        comment: "explicit unresolved Agent route consequence"),
+                    evidence: [CleanupAgentEvidence(
+                        basis: .gap,
+                        label: NSLocalizedString("Agent investigation unresolved", comment: ""),
+                        detail: reason)],
+                    forceDeselect: true)
+            }
+        }
+
         for proposal in allProposals {
             guard known.contains(proposal.candidateId), seen.insert(proposal.candidateId).inserted,
                   let candidate = candidates.first(where: { $0.id == proposal.candidateId }) else {
                 continue
             }
+            guard !resolved.contains(candidate.id) else { continue }
 
             if proposalCounts[proposal.candidateId, default: 0] != 1 {
                 let reason = NSLocalizedString(
@@ -773,7 +926,8 @@ final class CleanupPlanStore: ObservableObject {
                     evidence: [CleanupAgentEvidence(
                         basis: .gap,
                         label: NSLocalizedString("Agent judgment incomplete", comment: ""),
-                        detail: reason)])
+                        detail: reason)],
+                    forceDeselect: true)
                 continue
             }
 
@@ -824,7 +978,8 @@ final class CleanupPlanStore: ObservableObject {
                     evidence: [CleanupAgentEvidence(
                         basis: .gap,
                         label: NSLocalizedString("Host verification incomplete", comment: ""),
-                        detail: reason)])
+                        detail: reason)],
+                    forceDeselect: true)
                 continue
             }
             let policy = policyDisposition(proposed: proposal.disposition, candidate: candidate)
@@ -869,7 +1024,8 @@ final class CleanupPlanStore: ObservableObject {
                 evidence: [CleanupAgentEvidence(
                     basis: .gap,
                     label: NSLocalizedString("Agent judgment incomplete", comment: ""),
-                    detail: reason)])
+                    detail: reason)],
+                forceDeselect: true)
         }
         selection = nextSelection
         if let nextSelection {
@@ -884,7 +1040,7 @@ final class CleanupPlanStore: ObservableObject {
         agentProgress?.reviewedCount = accepted
         agentProgress?.finishedAt = Date()
         if accepted == candidates.count {
-            agentState = .ready(agent: analyzer.displayName, summary: analysis.summary)
+            agentState = .ready(agent: analyzer.displayName, summary: overallRecommendationText)
         } else if accepted > 0 {
             agentState = .degraded(
                 agent: analyzer.displayName,
@@ -1064,6 +1220,18 @@ final class CleanupPlanStore: ObservableObject {
         proposedCandidateIDs: Set<String>
     ) -> Bool {
         let investigation = proposal.investigation
+        // An explicit incomplete-investigation verdict is useful Agent work
+        // when it only narrows authority: keep the row unselected and show the
+        // exact missing evidence. It can never authorize deletion or turn an
+        // evidence gap into a user-choice prompt.
+        if proposal.disposition == .keep,
+           investigation.decisionBasis == .incompleteInvestigation,
+           investigation.consumerReference == .none,
+           (investigation.hasUnknownRequiredFact
+                || !investigation.unresolvedGaps.isEmpty
+                || proposal.evidence.contains(where: { $0.basis == .gap })) {
+            return true
+        }
         guard investigation.deepReviewCompleted,
               investigation.unresolvedGaps.isEmpty,
               !investigation.hasUnknownRequiredFact,
@@ -1232,7 +1400,9 @@ final class CleanupPlanStore: ObservableObject {
     ) -> CleanupAgentAnalysis {
         guard let snapshot = executionSnapshot else {
             return CleanupAgentAnalysis(summary: analysis.summary,
-                                        recommendations: analysis.recommendations)
+                                        recommendations: analysis.recommendations,
+                                        passThroughCandidateIDs: analysis.passThroughCandidateIDs,
+                                        unresolvedCandidateIDs: analysis.unresolvedCandidateIDs)
         }
         let parents = validatedDiscoveryParents(
             in: snapshot,
@@ -1263,7 +1433,9 @@ final class CleanupPlanStore: ObservableObject {
         }
         return CleanupAgentAnalysis(summary: analysis.summary,
                                     recommendations: analysis.recommendations,
-                                    discoveredCandidates: scoped)
+                                    discoveredCandidates: scoped,
+                                    passThroughCandidateIDs: analysis.passThroughCandidateIDs,
+                                    unresolvedCandidateIDs: analysis.unresolvedCandidateIDs)
     }
 
     /// A matching path string is not authority: the scanner parent may have
@@ -1349,7 +1521,9 @@ final class CleanupPlanStore: ObservableObject {
         return CleanupAgentAnalysis(
             summary: analysis.summary,
             recommendations: analysis.recommendations,
-            discoveredCandidates: measured)
+            discoveredCandidates: measured,
+            passThroughCandidateIDs: analysis.passThroughCandidateIDs,
+            unresolvedCandidateIDs: analysis.unresolvedCandidateIDs)
     }
 
     nonisolated private static func measuredAllocatedBytes(

@@ -101,6 +101,9 @@ struct CleanReviewView: View {
         case .analyzing(let agent):
             Label(String(format: NSLocalizedString("%@ analyzing", comment: ""), agent), systemImage: "sparkles")
                 .agentChip(color: accent)
+        case .stopped(let agent):
+            Label(String(format: NSLocalizedString("%@ analysis stopped", comment: ""), agent), systemImage: "stop.circle")
+                .agentChip(color: Brand.textTertiary)
         case .ready(let agent, _):
             Label(String(format: NSLocalizedString("Reviewed by %@", comment: ""), agent), systemImage: "sparkles")
                 .agentChip(color: accent)
@@ -147,6 +150,16 @@ struct CleanReviewView: View {
                     .buttonStyle(.plain).font(Brand.sans(11, .semibold)).foregroundStyle(Brand.amber)
             }
             .padding(12).background(RoundedRectangle(cornerRadius: 12).fill(Brand.amber.opacity(0.08)))
+        case .stopped:
+            HStack(spacing: 10) {
+                Image(systemName: "stop.circle.fill").foregroundStyle(Brand.textTertiary)
+                Text("Analysis stopped. Scanner results remain unchanged.")
+                    .font(Brand.sans(10)).foregroundStyle(Brand.textSecondary)
+                Spacer()
+                Button(NSLocalizedString("Resume analysis", comment: ""), action: onRetryAgent)
+                    .buttonStyle(.plain).font(Brand.sans(11, .semibold)).foregroundStyle(accent)
+            }
+            .padding(12).background(RoundedRectangle(cornerRadius: 12).fill(Brand.textTertiary.opacity(0.08)))
         case .ready(_, let summary):
             agentCompletedDisclosure(summary: summary)
         default:
@@ -181,16 +194,25 @@ struct CleanReviewView: View {
                             .font(Brand.mono(11, .medium)).foregroundStyle(accent)
                         Text(agentDurationGuidance(progress.elapsed(at: context.date)))
                             .font(Brand.sans(9)).foregroundStyle(Brand.textTertiary)
+                        Button(NSLocalizedString("Stop analysis", comment: "")) {
+                            planStore.stopAgentAnalysis()
+                        }
+                        .buttonStyle(.plain)
+                        .font(Brand.sans(9, .semibold))
+                        .foregroundStyle(Brand.textSecondary)
+                        .padding(.top, 3)
                     }
                 }
 
                 HStack(spacing: 7) {
-                    agentPhase("Candidates prepared", symbol: "checkmark.circle.fill", state: .done)
-                    agentPhaseConnector(done: true)
-                    agentPhase("Triage & deep review", symbol: "point.3.connected.trianglepath.dotted",
-                               state: progress.phase == .investigating ? .active : .done)
-                    agentPhaseConnector(done: progress.phase != .investigating)
-                    agentPhase("Plan validation", symbol: "shield.checkered",
+                    agentPhase("Candidate screening", symbol: "line.3.horizontal.decrease.circle",
+                               state: progress.phase == .routing ? .active : .done)
+                    agentPhaseConnector(done: progress.phase != .routing)
+                    agentPhase("High-risk review", symbol: "magnifyingglass",
+                               state: progress.phase == .routing ? .pending
+                                   : progress.phase == .investigating ? .active : .done)
+                    agentPhaseConnector(done: progress.phase == .validating || progress.phase == .completed)
+                    agentPhase("Safety validation", symbol: "shield.checkered",
                                state: progress.phase == .validating ? .active : .pending)
                 }
                 .accessibilityElement(children: .combine)
@@ -203,40 +225,45 @@ struct CleanReviewView: View {
     }
 
     private func activeAgentTitle(agent: String, progress: CleanupAgentProgress) -> String {
-        if let reviewed = progress.reviewedCount,
-           progress.phase == .investigating,
-           reviewed < progress.candidateCount {
+        switch progress.phase {
+        case .routing:
             return String(
-                format: NSLocalizedString("%@ has analyzed %d of %d candidates", comment: "cleanup Agent active progress title"),
-                agent, reviewed, progress.candidateCount)
-        }
-        if progress.phase == .validating {
+                format: NSLocalizedString("Burrow is screening all %d scanner candidates", comment: "cleanup deterministic routing title"),
+                progress.candidateCount)
+        case .investigating:
+            if let reviewed = progress.reviewedCount, reviewed > 0 {
+                return String(
+                    format: NSLocalizedString("%@ is deeply checking high-risk items · %d completed", comment: "cleanup Agent deep-review progress title"),
+                    agent, reviewed)
+            }
             return String(
-                format: NSLocalizedString("%@ is validating %d judgments", comment: "cleanup Agent validation title"),
-                agent, progress.candidateCount)
+                format: NSLocalizedString("%@ is deeply checking high-risk items", comment: "cleanup Agent deep-review title"),
+                agent)
+        case .validating:
+            return String(
+                format: NSLocalizedString("%@ is validating the reviewed plan", comment: "cleanup Agent validation title"),
+                agent)
+        case .completed:
+            return NSLocalizedString("Cleanup review completed", comment: "cleanup review completed title")
         }
-        return String(
-            format: NSLocalizedString("%@ is analyzing %d candidates", comment: "cleanup Agent active title"),
-            agent, progress.candidateCount)
     }
 
     private func agentCompletedDisclosure(summary _: String) -> some View {
-        let reviewed = planStore.agentProgress?.reviewedCount ?? planStore.totalCount
         let duration = planStore.agentProgress.map { elapsedText($0.elapsed()) }
         return HStack(alignment: .top, spacing: 11) {
             Image(systemName: "checkmark.circle.fill")
                 .font(.system(size: 15)).foregroundStyle(accent)
             VStack(alignment: .leading, spacing: 4) {
-                Text(String(
-                    format: NSLocalizedString("Codex completed %d judgments", comment: "cleanup Agent completed title"),
-                    reviewed))
+                Text(NSLocalizedString("Cleanup review completed", comment: "cleanup Agent completed title"))
                     .font(Brand.sans(12, .semibold)).foregroundStyle(Brand.textPrimary)
                 if let duration {
                     Text(String(
-                        format: NSLocalizedString("Finished in %@. Candidate mapping and path policy checks passed.", comment: "cleanup Agent completion metadata"),
+                        format: NSLocalizedString("Finished in %@. Burrow applied path and safety checks.", comment: "cleanup Agent completion metadata"),
                         duration))
                         .font(Brand.mono(9)).foregroundStyle(Brand.textTertiary)
                 }
+                Text(decisionSourceSummaryText)
+                    .font(Brand.mono(9)).foregroundStyle(Brand.textTertiary)
                 Text(planStore.overallRecommendationText)
                     .font(Brand.sans(10)).foregroundStyle(Brand.textSecondary)
                     .fixedSize(horizontal: false, vertical: true)
@@ -287,9 +314,13 @@ struct CleanReviewView: View {
 
     private func activeAgentDetail(_ phase: CleanupAgentProgress.Phase) -> String {
         switch phase {
+        case .routing:
+            return NSLocalizedString(
+                "Sorting every scanner candidate by deterministic safety, ownership, and review depth.",
+                comment: "cleanup Agent routing detail")
         case .investigating:
             return NSLocalizedString(
-                "Checking app ownership, version relationships, active references, and rebuildability.",
+                "Deep-checking only the higher-risk items for ownership, active references, and recoverability.",
                 comment: "cleanup Agent investigation detail")
         case .validating:
             return NSLocalizedString(
@@ -303,14 +334,15 @@ struct CleanReviewView: View {
     private func agentProgressAccessibility(_ progress: CleanupAgentProgress) -> String {
         let phase: String
         switch progress.phase {
-        case .investigating: phase = NSLocalizedString("Triage and deep review in progress", comment: "")
+        case .routing: phase = NSLocalizedString("Screening all scanner candidates", comment: "")
+        case .investigating: phase = NSLocalizedString("High-risk review in progress", comment: "")
         case .validating: phase = NSLocalizedString("Safety check in progress", comment: "")
         case .completed: phase = NSLocalizedString("Analysis complete", comment: "")
         }
         if let reviewed = progress.reviewedCount, progress.phase == .investigating {
             return String(
-                format: NSLocalizedString("%@, %d of %d candidates reviewed, %@ elapsed", comment: "cleanup Agent progress accessibility with count"),
-                phase, reviewed, progress.candidateCount, elapsedText(progress.elapsed()))
+                format: NSLocalizedString("%@, %d high-risk items completed, %@ elapsed", comment: "cleanup Agent progress accessibility with count"),
+                phase, reviewed, elapsedText(progress.elapsed()))
         }
         return String(
             format: NSLocalizedString("%@, %@ elapsed", comment: "cleanup Agent progress accessibility"),
@@ -323,13 +355,13 @@ struct CleanReviewView: View {
     }
 
     private func agentDurationGuidance(_ elapsed: TimeInterval) -> String {
-        if elapsed >= 300 {
+        if elapsed >= 75 {
             return NSLocalizedString(
-                "Still working — time varies with scan scope",
+                "Finishing the current bounded review",
                 comment: "cleanup Agent long-running duration guidance")
         }
         return NSLocalizedString(
-            "Deep review may take several minutes",
+            "Usually finishes within 1–2 minutes",
             comment: "cleanup Agent duration guidance")
     }
 
@@ -523,6 +555,8 @@ struct CleanReviewView: View {
                                         .font(Brand.mono(10)).foregroundStyle(Brand.textTertiary)
                                 }
                             }
+                            Text(decisionSourceText(for: candidate, recommendation: recommendation))
+                                .font(Brand.mono(9, .medium)).foregroundStyle(Brand.textTertiary)
                             Text(recommendation.reason).font(Brand.sans(11)).foregroundStyle(Brand.textPrimary)
                                 .fixedSize(horizontal: false, vertical: true)
                             if planStore.userOverrides.contains(candidate.id) {
@@ -628,9 +662,9 @@ struct CleanReviewView: View {
                 }
 
                 VStack(alignment: .leading, spacing: 9) {
-                    Label("Plan-wide judgment", systemImage: "sparkles")
+                    Label("Reviewed plan", systemImage: "checklist.checked")
                         .font(Brand.sans(13, .semibold)).foregroundStyle(accent)
-                    Text(planStore.overallRecommendationText)
+                    Text(overallPlanSummaryText)
                         .font(Brand.sans(11)).foregroundStyle(Brand.textPrimary)
                         .fixedSize(horizontal: false, vertical: true)
                 }
@@ -643,9 +677,18 @@ struct CleanReviewView: View {
                     overviewMetric(.keep)
                 }
 
+                VStack(alignment: .leading, spacing: 9) {
+                    Text("Decision sources")
+                        .font(Brand.sans(11, .semibold)).foregroundStyle(Brand.textSecondary)
+                    decisionSourceRow(.scanner)
+                    decisionSourceRow(.burrow)
+                    decisionSourceRow(.codex)
+                    decisionSourceRow(.user)
+                }
+
                 if !planStore.userOverrides.isEmpty {
                     Text(String(
-                        format: NSLocalizedString("Your %d manual changes are already applied to the staged plan; Codex's original judgment remains visible on each item.", comment: "cleanup overview manual changes"),
+                        format: NSLocalizedString("Your %d manual changes are applied to the staged plan; each item's original Scanner, Burrow, or Codex source remains visible.", comment: "cleanup overview manual changes"),
                         planStore.userOverrides.count))
                         .font(Brand.sans(10, .semibold)).foregroundStyle(Brand.amber)
                         .fixedSize(horizontal: false, vertical: true)
@@ -676,6 +719,109 @@ struct CleanReviewView: View {
         }
     }
 
+    private var overallPlanSummaryText: String {
+        switch planStore.agentState {
+        case .analyzing:
+            return NSLocalizedString(
+                "Scanner results remain staged while Burrow and Codex build the reviewed plan.",
+                comment: "cleanup plan summary during Agent analysis")
+        case .ready, .degraded:
+            return planStore.overallRecommendationText
+        case .stopped:
+            return NSLocalizedString(
+                "Analysis stopped. Scanner results remain unchanged.",
+                comment: "cleanup plan summary after Agent stop")
+        default:
+            return NSLocalizedString(
+                "The scanner produced this baseline. No Codex judgment has been applied.",
+                comment: "cleanup scanner-only plan summary")
+        }
+    }
+
+    private enum ReviewDecisionSource: CaseIterable, Equatable {
+        case scanner, burrow, codex, user
+
+        var title: String {
+            switch self {
+            case .scanner: return NSLocalizedString("Scanner", comment: "cleanup decision source")
+            case .burrow: return NSLocalizedString("Burrow safety", comment: "cleanup decision source")
+            case .codex: return "Codex"
+            case .user: return NSLocalizedString("You", comment: "cleanup decision source")
+            }
+        }
+
+        var symbol: String {
+            switch self {
+            case .scanner: return "viewfinder"
+            case .burrow: return "shield.checkered"
+            case .codex: return "sparkles"
+            case .user: return "person.crop.circle"
+            }
+        }
+    }
+
+    private func decisionSourceCount(_ source: ReviewDecisionSource) -> Int {
+        planStore.candidates.reduce(into: 0) { count, candidate in
+            if planStore.userOverrides.contains(candidate.id) {
+                if source == .user { count += 1 }
+                return
+            }
+            let origin = planStore.recommendation(for: candidate.id).origin
+            switch (source, origin) {
+            case (.scanner, .scanner), (.burrow, .burrowSafety), (.codex, .agent), (.user, .user):
+                count += 1
+            default:
+                break
+            }
+        }
+    }
+
+    private func originalDecisionSource(
+        for recommendation: CleanupCandidateRecommendation
+    ) -> ReviewDecisionSource {
+        switch recommendation.origin {
+        case .scanner: return .scanner
+        case .burrowSafety: return .burrow
+        case .agent: return .codex
+        case .user: return .user
+        }
+    }
+
+    private func decisionSourceText(
+        for candidate: CleanupPlanCandidate,
+        recommendation: CleanupCandidateRecommendation
+    ) -> String {
+        let original = originalDecisionSource(for: recommendation).title
+        if planStore.userOverrides.contains(candidate.id) {
+            return String(
+                format: NSLocalizedString("Current decision: You · Original source: %@", comment: "cleanup item decision source after user override"),
+                original)
+        }
+        return String(
+            format: NSLocalizedString("Decision source: %@", comment: "cleanup item decision source"),
+            original)
+    }
+
+    private var decisionSourceSummaryText: String {
+        String(
+            format: NSLocalizedString("Decision sources: Scanner %d · Burrow %d · Codex %d · You %d", comment: "cleanup decision source summary"),
+            decisionSourceCount(.scanner), decisionSourceCount(.burrow),
+            decisionSourceCount(.codex), decisionSourceCount(.user))
+    }
+
+    private func decisionSourceRow(_ source: ReviewDecisionSource) -> some View {
+        HStack(spacing: 8) {
+            Image(systemName: source.symbol)
+                .font(.system(size: 10, weight: .semibold))
+                .foregroundStyle(source == .user ? Brand.amber : accent)
+                .frame(width: 18)
+            Text(source.title).font(Brand.sans(10)).foregroundStyle(Brand.textPrimary)
+            Spacer()
+            Text("\(decisionSourceCount(source))")
+                .font(Brand.mono(10)).foregroundStyle(Brand.textSecondary)
+        }
+    }
+
     private var overallInspectorTitle: String {
         switch planStore.agentState {
         case .ready:
@@ -684,6 +830,8 @@ struct CleanReviewView: View {
             return NSLocalizedString("Codex is analyzing", comment: "cleanup overall inspector")
         case .degraded:
             return NSLocalizedString("Codex review incomplete", comment: "cleanup overall inspector")
+        case .stopped:
+            return NSLocalizedString("Codex analysis stopped", comment: "cleanup overall inspector")
         default:
             return NSLocalizedString("Scanner baseline", comment: "cleanup overall inspector")
         }
@@ -743,15 +891,12 @@ struct CleanReviewView: View {
         if case .degraded = planStore.agentState {
             return NSLocalizedString("Codex review incomplete · Retry", comment: "cleanup confirm pill")
         }
-        if planStore.canUseAgentCTA {
-            return String(format: NSLocalizedString("Clean verified plan · %@", comment: ""), total)
+        if case .stopped = planStore.agentState {
+            return String(
+                format: NSLocalizedString("Clean current selection · %@", comment: "cleanup confirm pill after Agent stop"),
+                total)
         }
-        if !planStore.userOverrides.isEmpty {
-            return String(format: NSLocalizedString("Clean current plan · %@", comment: ""), total)
-        }
-        return Store.cacheRemovalMode == .trash
-            ? String(format: NSLocalizedString("Move to Trash · %@", comment: "confirm pill"), total)
-            : String(format: NSLocalizedString("Permanently clean · %@", comment: "confirm pill"), total)
+        return String(format: NSLocalizedString("Clean reviewed plan · %@", comment: "cleanup confirm pill"), total)
     }
 
     // MARK: - Category chrome
