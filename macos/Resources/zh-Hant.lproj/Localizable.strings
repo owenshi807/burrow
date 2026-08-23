@@ -86,6 +86,8 @@
 "· %@ items · %@ categories" = "· %@ 個項目 · %@ 個類別";
 "Scanning your Mac…" = "正在掃描你的 Mac…";
 "Scanning your Mac… · %@ elapsed" = "正在掃描你的 Mac… · 已用時 %@";
+"%d cleanup items found" = "已發現 %d 個可清理項";
+"Checking %@" = "正在掃描 %@";
 "The engine is still scanning. This read-only preview can take several minutes on large caches." = "掃描引擎仍在工作。快取較大時，這項唯讀預覽可能需要幾分鐘。";
 "Cleaning… don't quit." = "正在清理…請勿結束。";
 "Preview — review, then clean for real." = "預覽完成 — 請檢查後再正式清理。";

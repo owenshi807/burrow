@@ -25,6 +25,12 @@
 
 import Foundation
 
+struct BurrowScanProgress: Equatable, Sendable {
+    var discoveredBytes: Int64 = 0
+    var discoveredItems: Int = 0
+    var currentSection: String?
+}
+
 enum BurrowStreamReport {
     /// The card title for a streamed run's one group, decided by the mo-style argv the operation
     /// was built with rather than inferred from the events that come back.
@@ -127,6 +133,43 @@ enum BurrowStreamReport {
         return Int64(bytes)
     }
 
+    /// A truthful, transport-agnostic progress projection for Clean's scan hero.
+    /// Current engines stream NDJSON; Burrow 0.14's signed conductor streams the
+    /// legacy human report even when invoked with `--stream`. The UI must keep
+    /// moving for both instead of interpreting every legacy line as zero.
+    static func scanProgress(_ lines: [String]) -> BurrowScanProgress {
+        var progress = BurrowScanProgress()
+
+        for raw in lines {
+            if let obj = object(from: raw), let event = obj["event"] as? String {
+                if event == "removed" || event == "would_remove" {
+                    if let bytes = intField(obj, "bytes") {
+                        progress.discoveredBytes += Int64(bytes)
+                    }
+                    progress.discoveredItems += max(1, intField(obj, "items") ?? 1)
+                    if let path = obj["path"] as? String, !path.isEmpty {
+                        progress.currentSection = (path as NSString).lastPathComponent
+                    }
+                }
+                continue
+            }
+
+            let line = Ansi.strip(raw).trimmingCharacters(in: .whitespacesAndNewlines)
+            guard let first = line.first else { continue }
+            if first == "➤" {
+                let section = String(line.dropFirst()).trimmingCharacters(in: .whitespaces)
+                if !section.isEmpty { progress.currentSection = section }
+                continue
+            }
+            guard first == "→" || first == "➜" else { continue }
+
+            progress.discoveredBytes += CleanList.streamedItemBytes(line)
+            progress.discoveredItems += legacyItemCount(in: line)
+        }
+
+        return progress
+    }
+
     // MARK: - internals
 
     private static func object(from line: String) -> [String: Any]? {
@@ -135,6 +178,37 @@ enum BurrowStreamReport {
               let obj = try? JSONSerialization.jsonObject(with: data) as? [String: Any]
         else { return nil }
         return obj
+    }
+
+    /// Legacy action rows aggregate files into phrases such as `165 items`,
+    /// `1500 old items`, or `5 dirs`. Count the reported cleanup entities; a
+    /// row without an explicit count still represents one discovered target.
+    private static func legacyItemCount(in line: String) -> Int {
+        let normalized = line
+            .replacingOccurrences(of: ",", with: " ")
+            .replacingOccurrences(of: "·", with: " ")
+        let words = normalized.split(whereSeparator: { $0.isWhitespace }).map(String.init)
+        let unitWords: Set<String> = [
+            "item", "items", "dir", "dirs", "file", "files",
+            "project", "projects", "device", "devices", "version", "versions",
+        ]
+
+        for index in words.indices {
+            let numberText = words[index].trimmingCharacters(
+                in: CharacterSet(charactersIn: "+:;()[]"))
+            guard let count = Int(numberText), count >= 0 else { continue }
+            let next = index + 1
+            if next < words.count, unitWords.contains(words[next].lowercased()) {
+                return count
+            }
+            let afterNext = index + 2
+            if next < words.count, afterNext < words.count,
+               words[next].lowercased() == "old",
+               unitWords.contains(words[afterNext].lowercased()) {
+                return count
+            }
+        }
+        return 1
     }
 
     /// Build the summary from a `done` event, covering both the live and preview shapes of clean

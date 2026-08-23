@@ -6,9 +6,9 @@
 //
 //    idle      — the minimal hero. "Scan your Mac" (dry-run) or the
 //                direct "Clean Now" path.
-//    scanning/ — the same hero with a huge live total that counts up as
-//    result      the dry-run streams; the animation IS the scan
-//                progress. "Review results" pushes the review.
+//    scanning/ — the same hero with a live discovered total, candidate
+//    result      count, and current scanner section. "Review results"
+//                pushes the review.
 //    review    — CleanReviewView: per-item ticks, locked-app badges,
 //                the honest confirm pill.
 //    run       — the existing elevated `mo clean` with streaming report.
@@ -25,8 +25,14 @@ import SwiftUI
 import AppKit
 
 /// Dry-run report: the themed groups + summary TaskReport always built,
-/// plus the live byte total the count-up hero renders.
-typealias CleanDryReport = (groups: [TaskGroup], summary: TaskSummary?, liveBytes: Int64)
+/// plus transport-agnostic live discovery progress for the scan hero.
+typealias CleanDryReport = (
+    groups: [TaskGroup],
+    summary: TaskSummary?,
+    liveBytes: Int64,
+    discoveredItems: Int,
+    currentSection: String?
+)
 
 enum CleanScanFinishedPresentation: Equatable {
     case result
@@ -50,9 +56,8 @@ struct CleanView: View {
     @State private var reviewList: CleanList?
     @State private var reviewSnapshot: CleanupSnapshot?
     @State private var reviewLocked: [String: CleanSelection.LockReason] = [:]
-    /// The bundled preview planner can spend minutes without emitting an
-    /// item. Keep an elapsed clock so that silence never looks like a frozen
-    /// app even while the byte count remains zero.
+    /// Keep an elapsed clock beside the engine's streamed section and
+    /// candidate progress so a long, read-only walk never looks frozen.
     @State private var scanStartedAt: Date?
     /// Trash-mode result line, shown as a done banner.
     @State private var trashResult: String?
@@ -188,8 +193,9 @@ struct CleanView: View {
 
     // MARK: - Scanning / result hero (2.1)
 
-    /// Scanning and result share one layout — the number mounts at 0 and
-    /// ticks up live, so the count-up IS the progress indicator.
+    /// Scanning and result share one layout. The total is discovered cleanup
+    /// space, while the smaller line carries the actual work signal: how many
+    /// cleanup entities have arrived and which scanner section is active.
     private func scanHero(final: Bool) -> some View {
         let bytes = displayBytes(final: final)
         return VStack(spacing: 18) {
@@ -224,6 +230,7 @@ struct CleanView: View {
                                     Text("Stop").font(Brand.mono(11)).foregroundStyle(Brand.red)
                                 }.buttonStyle(.plain)
                             }
+                            scanActivityDescription
                             if scanElapsedSeconds(at: context.date) >= 30 {
                                 Text("The engine is still scanning. This read-only preview can take several minutes on large caches.")
                                     .font(Brand.mono(10)).foregroundStyle(Brand.textTertiary)
@@ -307,6 +314,35 @@ struct CleanView: View {
             if parsed > 0 { return parsed }
         }
         return dryFlow.report?.liveBytes ?? 0
+    }
+
+    @ViewBuilder
+    private var scanActivityDescription: some View {
+        let items = dryFlow.report?.discoveredItems ?? 0
+        let section = dryFlow.report?.currentSection.map { TaskReportText.title($0) }
+        if items > 0 || section != nil {
+            HStack(spacing: 5) {
+                if items > 0 {
+                    Text(String(
+                        format: NSLocalizedString("%d cleanup items found", comment: "cleanup scan live candidate count"),
+                        items))
+                        .contentTransition(.numericText(value: Double(items)))
+                        .animation(reduceMotion ? nil : Brand.Motion.state, value: items)
+                }
+                if items > 0, section != nil { Text("·") }
+                if let section {
+                    Text(String(
+                        format: NSLocalizedString("Checking %@", comment: "cleanup scan live section"),
+                        section))
+                        .id(section)
+                        .transition(.opacity)
+                        .animation(reduceMotion ? nil : Brand.Motion.state, value: section)
+                }
+            }
+            .font(Brand.sans(10))
+            .foregroundStyle(Brand.textTertiary)
+            .accessibilityElement(children: .combine)
+        }
     }
 
     // MARK: - Review
@@ -596,10 +632,14 @@ struct CleanView: View {
                       // reads back "0 B found" with no summary and no forward path. See BurrowStreamReport.
                       reduce: { lines in
                           let (groups, summary) = BurrowStreamReport.reduce(lines)
-                          let bytes = lines.reduce(Int64(0)) { $0 + BurrowStreamReport.streamedBytes($1) }
-                          return (groups, summary, bytes)
+                          let progress = BurrowStreamReport.scanProgress(lines)
+                          return (groups, summary, progress.discoveredBytes,
+                                  progress.discoveredItems, progress.currentSection)
                       },
-                      hudLine: { BurrowStreamReport.hudLine($0) },
+                      hudLine: {
+                          let jsonLabel = BurrowStreamReport.hudLine($0)
+                          return jsonLabel.isEmpty ? TaskReportText.line($0) : jsonLabel
+                      },
                       // The scan is the step people walk away from — it can run
                       // for minutes on a full disk and, unlike the clean, it ends
                       // by just sitting there with a number. Same opt-in the real

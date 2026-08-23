@@ -139,7 +139,10 @@ struct CleanList: Equatable {
         let t = line.trimmingCharacters(in: .whitespaces)
         guard t.hasSuffix(" dry"),
               let comma = t.range(of: ", ", options: .backwards) else { return 0 }
-        let sizeText = String(t[comma.upperBound...].dropLast(" dry".count))
+        var sizeText = String(t[comma.upperBound...].dropLast(" dry".count))
+        if sizeText.hasPrefix("at least ") {
+            sizeText.removeFirst("at least ".count)
+        }
         return parseSize(sizeText)
     }
 }

@@ -86,6 +86,8 @@
 "· %@ items · %@ categories" = "· %@ элементов · %@ категорий";
 "Scanning your Mac…" = "Сканирование вашего Mac…";
 "Scanning your Mac… · %@ elapsed" = "Сканирование вашего Mac… · прошло %@";
+"%d cleanup items found" = "Найдено объектов для очистки: %d";
+"Checking %@" = "Сканируется: %@";
 "The engine is still scanning. This read-only preview can take several minutes on large caches." = "Движок всё ещё сканирует. Для больших кэшей этот предварительный просмотр только для чтения может занять несколько минут.";
 "Cleaning… don't quit." = "Очистка… не закрывайте приложение.";
 "Preview — review, then clean for real." = "Предпросмотр — проверьте, затем выполните очистку.";

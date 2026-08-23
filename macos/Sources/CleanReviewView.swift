@@ -20,7 +20,6 @@ struct CleanReviewView: View {
 
     @State private var expanded: Set<String> = []
     @State private var evidenceExpanded = false
-    @State private var agentPulse = false
     @Environment(\.accessibilityReduceMotion) private var reduceMotion
 
     var body: some View {
@@ -200,21 +199,6 @@ struct CleanReviewView: View {
             .padding(13)
             .background(RoundedRectangle(cornerRadius: 14, style: .continuous).fill(accent.opacity(0.075)))
             .overlay(RoundedRectangle(cornerRadius: 14, style: .continuous).strokeBorder(accent.opacity(0.24)))
-            .onAppear { agentPulse = !reduceMotion }
-            .onDisappear { agentPulse = false }
-            .onChange(of: reduceMotion) { _, reduced in agentPulse = !reduced }
-            .onChange(of: progress.phase) { _, _ in
-                guard !reduceMotion else { agentPulse = false; return }
-                // The active capsule moves from investigation to validation.
-                // Restart its local opacity cycle so the newly active node
-                // does not inherit the previous node's settled endpoint.
-                agentPulse = false
-                Task { @MainActor in
-                    await Task.yield()
-                    guard !reduceMotion else { return }
-                    agentPulse = true
-                }
-            }
         }
     }
 
@@ -288,15 +272,11 @@ struct CleanReviewView: View {
         }
         .foregroundStyle(color)
         .padding(.horizontal, 8).padding(.vertical, 5)
-        .background(Capsule().fill(state == .active
-                                   ? accent.opacity(agentPulse ? 0.18 : 0.10)
-                                   : Color.clear))
+        .background(Capsule().fill(state == .active ? accent.opacity(0.10) : Color.clear))
         .overlay(Capsule().strokeBorder(
-            state == .active ? accent.opacity(agentPulse ? 0.62 : 0.24) : Color.clear,
+            state == .active ? accent.opacity(0.24) : Color.clear,
             lineWidth: 1))
         .animation(reduceMotion ? nil : Brand.Motion.state, value: state)
-        .animation(reduceMotion || state != .active ? nil : Brand.Motion.pulse,
-                   value: agentPulse)
     }
 
     private func agentPhaseConnector(done: Bool) -> some View {

@@ -132,6 +132,11 @@ final class CleanListTests: XCTestCase {
         let total = lines.reduce(Int64(0)) { $0 + CleanList.streamedItemBytes($1) }
         XCTAssertEqual(total, CleanList.parseSize("33.0MB") + CleanList.parseSize("2.24GB"))
     }
+
+    func testStreamedItemBytes_acceptsLegacyAtLeastSize() {
+        let line = "  → Application Support logs and caches, at least 863.5MB dry"
+        XCTAssertEqual(CleanList.streamedItemBytes(line), CleanList.parseSize("863.5MB"))
+    }
 }
 
 private func XCTAssertEqual(_ a: Int64, _ b: Int64, accuracy: Int64,

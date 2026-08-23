@@ -106,4 +106,36 @@ final class BurrowStreamReportTests: XCTestCase {
         let total = lines.reduce(Int64(0)) { $0 + BurrowStreamReport.streamedBytes($1) }
         XCTAssertEqual(total, 350)
     }
+
+    func testScanProgress_readsLegacyHumanStreamWithoutStayingAtZero() {
+        let lines = [
+            "➤ User essentials",
+            "  → User app cache 165 items, 630.4MB dry",
+            "  → User app logs 20 items, 1.8MB dry",
+            "➤ Browsers",
+        ]
+
+        let progress = BurrowStreamReport.scanProgress(lines)
+
+        XCTAssertEqual(
+            progress.discoveredBytes,
+            CleanList.parseSize("630.4MB") + CleanList.parseSize("1.8MB")
+        )
+        XCTAssertEqual(progress.discoveredItems, 185)
+        XCTAssertEqual(progress.currentSection, "Browsers")
+    }
+
+    func testScanProgress_readsCurrentNDJSONStream() {
+        let lines = [
+            #"{"event":"would_remove","path":"/Users/x/Library/Caches/npm","bytes":1024,"items":3}"#,
+            #"{"event":"would_remove","path":"/Users/x/Library/Caches/pnpm","bytes":2048}"#,
+            #"{"event":"protected","path":"/Users/x/keep"}"#,
+        ]
+
+        let progress = BurrowStreamReport.scanProgress(lines)
+
+        XCTAssertEqual(progress.discoveredBytes, 3072)
+        XCTAssertEqual(progress.discoveredItems, 4)
+        XCTAssertEqual(progress.currentSection, "pnpm")
+    }
 }
