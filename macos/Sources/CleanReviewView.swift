@@ -474,6 +474,9 @@ struct CleanReviewView: View {
                 }.overlay(RoundedRectangle(cornerRadius: 5).strokeBorder(Brand.hairline))
             }.buttonStyle(.plain).disabled(candidate.locked)
 
+            // Selecting a leaf opens the evidence inspector; it does not
+            // disclose another list level, so this row intentionally has no
+            // chevron. Only sectionCard owns an actual disclosure control.
             Button { planStore.selectCandidate(candidate.id) } label: {
                 HStack(spacing: 10) {
                     VStack(alignment: .leading, spacing: 2) {
@@ -485,8 +488,6 @@ struct CleanReviewView: View {
                     judgmentBadge(recommendation, candidate: candidate)
                     Text(candidate.sizeText).font(Brand.mono(11)).foregroundStyle(Brand.textSecondary)
                         .frame(minWidth: 56, alignment: .trailing)
-                    Image(systemName: "chevron.right").font(.system(size: 9, weight: .semibold))
-                        .foregroundStyle(active ? accent : Brand.textTertiary)
                 }
                 .contentShape(Rectangle())
             }
