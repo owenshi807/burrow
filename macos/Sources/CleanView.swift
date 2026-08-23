@@ -346,7 +346,10 @@ struct CleanView: View {
     /// session: it pins exactly the selected cleanup roots and revalidates
     /// their identities at every execution boundary.
     private func confirmClean(_ selection: CleanSelection) {
-        guard let snapshot = reviewSnapshot else { return }
+        // Agent-discovered leaf candidates are recaptured into an augmented
+        // snapshot before they enter the plan. Always execute the snapshot
+        // owned by the visible plan, never the pre-Agent scanner snapshot.
+        guard let snapshot = agentPlan.executionSnapshot ?? reviewSnapshot else { return }
         if Store.cacheRemovalMode == .trash {
             trashTicked(selection, snapshot: snapshot)
         } else {

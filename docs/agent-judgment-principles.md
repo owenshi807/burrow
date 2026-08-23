@@ -59,6 +59,17 @@ Evidence requirements:
 - Absence of recent access is weak evidence because many applications do not update timestamps reliably.
 - Confidence summarizes evidence quality; it never replaces evidence.
 - A delete recommendation requires at least one observation or verified relationship.
+- A reference proves current use only when its source is outside the candidate, still current, and points back to the candidate. Internal refs, manifests, indexes, blob links, aliases, and `current` pointers establish internal structure, not an external consumer.
+
+Burrow verifies a claimed current consumer as a typed relationship, not prose:
+
+- `sourcePath` must resolve to an existing independent object outside the candidate;
+- `targetPath` must resolve to the candidate or one of its descendants;
+- `current` must be true;
+- `symbolic_link` must actually resolve from source to target, while
+  `textual_path` must be a bounded regular file that actually contains the
+  declared target path;
+- `consumerBasis=external_current` and `decisionBasis=current_consumer` are rejected unless that relationship passes local canonical-path validation.
 
 ## 5. Verdict contract
 
@@ -71,6 +82,10 @@ Recommend `delete` only when:
 - the candidate scope is homogeneous enough to act on;
 - the consequence and recovery path are understood.
 
+The typed decision basis must be `unused_recoverable`. A result that also
+claims an external current consumer, mixed container, incomplete investigation,
+user tradeoff, or sensitive/irreplaceable value is contradictory and is rejected.
+
 ### Keep
 
 Recommend `keep` when:
@@ -80,11 +95,16 @@ Recommend `keep` when:
 
 “Keep” can mean “currently valuable” or “not proven disposable.” The evidence panel should make the distinction clear.
 
+A completed keep uses `current_consumer`, `mixed_container`, or
+`sensitive_or_irreplaceable`. An incomplete investigation stays fail-closed but
+does not count as a completed Agent plan merely because keeping is safer.
+
 ### Human intent required
 
 Use `human_intent_required` only when factual investigation is substantially complete and the remaining decision is a real preference or cost tradeoff, such as whether a known-unused but expensive-to-recover asset is worth retaining.
 
 Do not use this state as a substitute for missing investigation.
+Its typed decision basis must be `user_tradeoff`.
 
 ## 6. Granularity before recommendation
 
@@ -93,6 +113,7 @@ A recommendation applies only to the object actually investigated.
 - Do not delete a heterogeneous parent because some children are disposable.
 - Prefer independently judged leaves when children have different owners, lifecycle states, consequences, or evidence.
 - If the scanner produced a coarse candidate, the Agent may propose narrower candidates marked **Agent discovered**.
+- A heterogeneous parent cannot count as a completed judgment until independently meaningful descendants have their own judgments. Keeping the parent is safe, but it is not evidence that every child remains useful.
 - Burrow must reject overlapping execution scopes that could bypass a kept child through a selected parent.
 
 ## 7. Recommendation output
@@ -106,6 +127,10 @@ Each item-level judgment should answer, in this order:
 5. **Confidence:** calibrated to evidence coverage and contradictions.
 
 The default UI shows the judgment and reason. Evidence and relationships remain attached to that item and expand on demand. Plan-wide totals are always computed by Burrow from typed judgments, never copied from Agent prose.
+
+Large scans may be evaluated in bounded batches to keep structured output complete and reviewable. Batching is a transport boundary, not an evidence boundary: every batch retains the full snapshot and full triage as relationship context, and Burrow rejects the combined result unless each scanner candidate appears exactly once and every discovered child belongs to its batch's assigned parent. Parent/descendant hierarchies remain coherent while unrelated leaves may be packed together for bounded transport.
+
+After the batches merge, a plan-wide consistency pass examines cross-item contradictions using the typed judgment details and relationship evidence. It is a veto gate only: it may reject the merged plan, but it may not invent a recommendation, alter a disposition, or expand the selected deletion set. Transport retries are similarly bounded and semantic: only explicit output-capacity or truncation failures may be split; rate limits, authentication, network, and input-context failures terminate the Agent run fail-closed.
 
 ## 8. User corrections are context, not global rules
 
@@ -139,5 +164,11 @@ Tests and review fixtures should cover behaviors, not brands:
 - a fully investigated preference tradeoff becomes human intent required;
 - a user override affects only the explicitly changed candidate;
 - a changed or newly active candidate is skipped at execution time.
+- a model cannot pair `external_current`/`current_consumer` with `delete`;
+- a cache-internal ref cannot be relabeled as an external current consumer;
+- a homogeneous scope cannot claim `mixed_container` to bypass child judgments;
+- an incomplete investigation cannot count as a completed keep.
 
 The quality bar is not “the Agent produced an answer.” It is “the answer exposes enough verified reasoning that a user can trust, challenge, or override it without repeating the investigation.”
+
+Candidate-level fail-closed behavior keeps that quality bar usable at scan scale. If one unlocked candidate has a missing, contradictory, inference-only, or otherwise incomplete judgment, Burrow converts only that candidate to an explicit conservative keep and removes it from the staged deletion set. Verified sibling judgments remain available. This fallback is attributed to Burrow, carries no Agent confidence or investigation claim, and must stay visible in the item UI; it never turns incomplete evidence into a delete recommendation or silently delegates an investigation gap to the user.

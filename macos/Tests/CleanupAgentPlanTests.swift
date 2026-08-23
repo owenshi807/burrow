@@ -34,7 +34,8 @@ final class CleanupAgentPlanTests: XCTestCase {
                 .init(candidateId: input.candidates[0].candidateId, disposition: .keep,
                       reason: "Still referenced by the installed app.",
                       consequence: "Keeping it preserves the active model.", confidence: 0.98,
-                      evidence: [.init(label: "Installed app", detail: "Reference found")]),
+                      evidence: [.init(label: "Installed app", detail: "Reference found")],
+                      investigation: .verifiedKeepFixture),
                 .init(candidateId: input.candidates[1].candidateId, disposition: .delete,
                       reason: "Superseded build output.", consequence: "Rebuilds on demand.",
                       confidence: 0.94, evidence: [.init(label: "Filesystem", detail: "Verified")]),
@@ -74,14 +75,15 @@ final class CleanupAgentPlanTests: XCTestCase {
         XCTAssertFalse(store.canUseAgentCTA)
     }
 
-    func testOneUserOverrideDoesNotBlockAgentSelectionForOtherCandidates() async throws {
+    func testMatchingAgentRecommendationClearsRedundantOverrideWithoutAffectingOtherCandidates() async throws {
         let fixture = try makeFixture()
         let analyzer = FakeCleanupAnalyzer(delay: 80_000_000) { input in
             CleanupAgentAnalysis(summary: "keep both", recommendations: input.candidates.map {
                 .init(candidateId: $0.candidateId, disposition: .keep,
                       reason: "Still needed.", consequence: "Keeping preserves it.",
                       confidence: 0.9,
-                      evidence: [.init(label: "Reference", detail: "Verified")])
+                      evidence: [.init(label: "Reference", detail: "Verified")],
+                      investigation: .verifiedKeepFixture)
             })
         }
         let store = CleanupPlanStore(analyzer: analyzer)
@@ -94,8 +96,10 @@ final class CleanupAgentPlanTests: XCTestCase {
 
         XCTAssertFalse(store.isSelected(first), "the user's row remains untouched")
         XCTAssertFalse(store.isSelected(second), "the unrelated row adopts the Agent keep judgment")
-        XCTAssertTrue(store.userOverrides.contains(first.id))
+        XCTAssertFalse(store.userOverrides.contains(first.id),
+                       "a matching final Agent judgment makes the provisional override redundant")
         XCTAssertFalse(store.userOverrides.contains(second.id))
+        XCTAssertTrue(store.canUseAgentCTA)
     }
 
     func testAgentProgressExposesRealStagesCandidateCountAndCompletion() async throws {
@@ -140,7 +144,7 @@ final class CleanupAgentPlanTests: XCTestCase {
         guard case .degraded(_, let reason) = store.agentState else {
             return XCTFail("timeout must become a visible degraded state")
         }
-        XCTAssertTrue(reason.contains("10"))
+        XCTAssertTrue(reason.contains("20"))
         XCTAssertEqual(store.selectedCount, originalSelectedCount)
         XCTAssertEqual(store.selectedBytes, originalSelectedBytes)
         XCTAssertEqual(store.agentProgress?.phase, .investigating)
@@ -194,7 +198,7 @@ final class CleanupAgentPlanTests: XCTestCase {
         XCTAssertEqual(store.selectedBytes, 2_000)
     }
 
-    func testReviewStartsWithPlanWideInspectorAndKeepsStableCategoryOrder() async throws {
+    func testReviewStartsWithPlanWideInspectorAndOrdersDeleteGroupsBySize() async throws {
         let categoryNames = ["Browsers", "App caches", "Developer tools", "Applications"]
         var categories: [CleanList.Category] = []
         for (index, name) in categoryNames.enumerated() {
@@ -221,7 +225,8 @@ final class CleanupAgentPlanTests: XCTestCase {
         store.startAgentAnalysis()
         try await waitUntilReady(store)
 
-        XCTAssertEqual(store.sections.filter { $0.disposition == .delete }.map(\.category), categoryNames)
+        XCTAssertEqual(store.sections.filter { $0.disposition == .delete }.map(\.category),
+                       ["Applications", "Developer tools", "App caches", "Browsers"])
         XCTAssertTrue(store.overallRecommendationText.contains("Reviewed 4 candidates"))
         XCTAssertFalse(store.overallRecommendationText.contains("999"),
                        "authoritative overview arithmetic is derived, never copied from model prose")
@@ -281,7 +286,7 @@ final class CleanupAgentPlanTests: XCTestCase {
                               detail: "No current project or installed application references this asset."),
                         .init(basis: .observation, label: "Recovery policy",
                               detail: "The inspected account policy requires a paid archive restore."),
-                      ]),
+                      ], investigation: .verifiedHumanIntentFixture),
             ])
         }
         let store = CleanupPlanStore(analyzer: analyzer)
@@ -308,16 +313,17 @@ final class CleanupAgentPlanTests: XCTestCase {
         }
         let store = CleanupPlanStore(analyzer: analyzer)
         store.load(list: fixture.list, snapshot: fixture.snapshot, locked: [:], hasAgentConsent: true)
-        let selectedCount = store.selectedCount
         store.startAgentAnalysis()
         try await waitUntilFinished(store)
 
-        guard case .degraded = store.agentState else {
-            return XCTFail("unsupported deletion judgments must fail closed")
+        guard case .ready = store.agentState else {
+            return XCTFail("unsupported deletion judgments should close at the candidate boundary")
         }
-        XCTAssertEqual(store.selectedCount, selectedCount)
-        XCTAssertTrue(store.recommendations.values.allSatisfy { $0.origin == .scanner })
-        XCTAssertFalse(store.canConfirmPlan)
+        XCTAssertEqual(store.selectedCount, 0)
+        XCTAssertTrue(store.recommendations.values.allSatisfy {
+            $0.origin == .burrowSafety && $0.disposition == .keep
+        })
+        XCTAssertFalse(store.canConfirmPlan, "there is no remaining selected cleanup")
     }
 
     func testInvestigationGapCannotBeRelabeledAsHumanIntent() async throws {
@@ -336,10 +342,12 @@ final class CleanupAgentPlanTests: XCTestCase {
         store.startAgentAnalysis()
         try await waitUntilFinished(store)
 
-        guard case .degraded = store.agentState else {
-            return XCTFail("missing investigation must not be delegated to the user")
+        guard case .ready = store.agentState else {
+            return XCTFail("missing investigation should become a conservative keep")
         }
-        XCTAssertTrue(store.recommendations.values.allSatisfy { $0.origin == .scanner })
+        XCTAssertTrue(store.recommendations.values.allSatisfy {
+            $0.origin == .burrowSafety && $0.disposition == .keep
+        })
         XCTAssertFalse(store.canConfirmPlan)
     }
 
@@ -349,6 +357,442 @@ final class CleanupAgentPlanTests: XCTestCase {
         XCTAssertTrue(principles.contains("Absence of evidence is not evidence of absence"))
         XCTAssertTrue(principles.contains("human_intent_required"))
         XCTAssertTrue(principles.contains("relationship"))
+        XCTAssertTrue(principles.contains("does not by itself prove an external consumer"))
+        XCTAssertTrue(principles.contains("natural child boundaries"))
+        XCTAssertTrue(principles.contains("consumerBasis=external_current"))
+    }
+
+    func testCodexRecommendationsAreSplitIntoBoundedStableBatches() {
+        let candidates = (0..<53).map { index in
+            CleanupAgentCandidateInput(
+                candidateId: "candidate-\(index)", path: "/tmp/candidate-\(index)",
+                category: "Developer tools", sizeBytes: Int64(index), itemCount: nil,
+                runningApp: nil, sensitivePathHint: false)
+        }
+
+        let batches = CodexCleanupAgentAdapter.recommendationBatches(
+            for: candidates, maximumSize: 24)
+
+        XCTAssertEqual(batches.map(\.count), [24, 24, 5])
+        XCTAssertEqual(batches.flatMap { $0.map(\.candidateId) },
+                       candidates.map(\.candidateId))
+    }
+
+    func testCodexBatchingKeepsAncestorAndDescendantInOneJudgmentContext() {
+        func candidate(_ id: String, _ path: String) -> CleanupAgentCandidateInput {
+            .init(candidateId: id, path: path, category: "Developer tools",
+                  sizeBytes: 1, itemCount: nil, runningApp: nil,
+                  sensitivePathHint: false)
+        }
+        let candidates = [
+            candidate("parent", "/tmp/cache"),
+            candidate("unrelated-a", "/tmp/other-a"),
+            candidate("unrelated-b", "/tmp/other-b"),
+            candidate("child", "/tmp/cache/version-1"),
+        ]
+
+        let batches = CodexCleanupAgentAdapter.recommendationBatches(
+            for: candidates, maximumSize: 2)
+        let relatedBatch = try? XCTUnwrap(batches.first { batch in
+            batch.contains { $0.candidateId == "parent" }
+        })
+
+        XCTAssertEqual(Set(relatedBatch?.map(\.candidateId) ?? []), ["parent", "child"])
+    }
+
+    func testCodexBatchingBoundsOneCoarseParentWithManyDescendants() {
+        var candidates: [CleanupAgentCandidateInput] = [
+            .init(candidateId: "home", path: "/Users/example", category: "User basics",
+                  sizeBytes: 1, itemCount: nil, runningApp: nil,
+                  sensitivePathHint: true),
+        ]
+        candidates += (0..<122).map { index in
+            .init(candidateId: "child-\(index)",
+                  path: "/Users/example/Library/Caches/app-\(index)/cache",
+                  category: "Application caches", sizeBytes: 1, itemCount: nil,
+                  runningApp: nil, sensitivePathHint: false)
+        }
+
+        let batches = CodexCleanupAgentAdapter.recommendationBatches(
+            for: candidates, maximumSize: 12)
+        let returned = batches.flatMap { $0.map(\.candidateId) }
+
+        XCTAssertTrue(batches.allSatisfy { !$0.isEmpty && $0.count <= 12 })
+        XCTAssertEqual(returned.count, candidates.count)
+        XCTAssertEqual(Set(returned), Set(candidates.map(\.candidateId)))
+        XCTAssertEqual(returned.filter { $0 == "home" }.count, 1)
+        XCTAssertEqual(batches.count, 12)
+    }
+
+    func testOnlyOutputCapacityFailuresAreEligibleForAdaptiveSplit() {
+        XCTAssertTrue(CodexCleanupAgentAdapter.isSplittableResponseError(.missingResponse))
+        XCTAssertTrue(CodexCleanupAgentAdapter.isSplittableResponseError(
+            .exited(1, "maximum output length exceeded")))
+        XCTAssertFalse(CodexCleanupAgentAdapter.isSplittableResponseError(
+            .exited(1, "authentication required")))
+        XCTAssertFalse(CodexCleanupAgentAdapter.isSplittableResponseError(
+            .exited(1, "response rate limit exceeded")))
+        XCTAssertFalse(CodexCleanupAgentAdapter.isSplittableResponseError(
+            .exited(1, "input context_length exceeds maximum")))
+        XCTAssertFalse(CodexCleanupAgentAdapter.isSplittableResponseError(
+            .launchFailed("permission denied")))
+    }
+
+    func testCodexBatchCoverageRejectsMissingDuplicateAndForeignJudgments() {
+        func recommendation(_ id: String) -> CleanupAgentRecommendation {
+            .init(candidateId: id, disposition: .keep, reason: "Keep.",
+                  consequence: "No change.", confidence: 0.8,
+                  evidence: [.init(label: "Observed", detail: "Verified.")])
+        }
+        let exact = CleanupAgentAnalysis(
+            summary: "Complete.", recommendations: [recommendation("a"), recommendation("b")])
+        let missing = CleanupAgentAnalysis(
+            summary: "Missing.", recommendations: [recommendation("a")])
+        let duplicate = CleanupAgentAnalysis(
+            summary: "Duplicate.", recommendations: [recommendation("a"), recommendation("a")])
+        let foreign = CleanupAgentAnalysis(
+            summary: "Foreign.", recommendations: [recommendation("a"), recommendation("c")])
+
+        XCTAssertTrue(CodexCleanupAgentAdapter.hasExactBatchCoverage(exact, targetIDs: ["a", "b"]))
+        XCTAssertFalse(CodexCleanupAgentAdapter.hasExactBatchCoverage(missing, targetIDs: ["a", "b"]))
+        XCTAssertFalse(CodexCleanupAgentAdapter.hasExactBatchCoverage(duplicate, targetIDs: ["a", "b"]))
+        XCTAssertFalse(CodexCleanupAgentAdapter.hasExactBatchCoverage(foreign, targetIDs: ["a", "b"]))
+    }
+
+    func testInternalSelfReferenceCannotCompleteCurrentConsumerKeep() async throws {
+        let fixture = try makeFixture()
+        let analyzer = FakeCleanupAnalyzer(delay: 0) { input in
+            CleanupAgentAnalysis(summary: "Self-reference only.", recommendations: input.candidates.map {
+                .init(candidateId: $0.candidateId, disposition: .keep,
+                      reason: "An internal ref points to a snapshot.",
+                      consequence: "Keep until external use is established.", confidence: 0.7,
+                      evidence: [.init(basis: .observation, label: "Internal ref",
+                                       detail: "The ref source and target are inside the candidate.")],
+                      investigation: .init(
+                        scope: .init(), ownership: .init(), consumers: .init(),
+                        lifecycle: .init(), recovery: .init(), sensitivity: .init(),
+                        unresolvedGaps: [], deepReviewCompleted: true,
+                        scopeKind: .homogeneous, consumerBasis: .internalOnly,
+                        decisionBasis: .currentConsumer))
+            })
+        }
+        let store = CleanupPlanStore(analyzer: analyzer)
+        store.load(list: fixture.list, snapshot: fixture.snapshot, locked: [:], hasAgentConsent: true)
+        store.startAgentAnalysis()
+        try await waitUntilFinished(store)
+
+        XCTAssertFalse(store.canConfirmPlan)
+        XCTAssertEqual(store.agentProgress?.reviewedCount, store.candidates.count)
+        XCTAssertTrue(store.recommendations.values.allSatisfy { $0.origin == .burrowSafety })
+    }
+
+    func testHeterogeneousParentWithoutChildJudgmentsCannotComplete() async throws {
+        let fixture = try makeFixture()
+        let analyzer = FakeCleanupAnalyzer(delay: 0) { input in
+            CleanupAgentAnalysis(summary: "Mixed parent.", recommendations: input.candidates.map {
+                .init(candidateId: $0.candidateId, disposition: .keep,
+                      reason: "The parent contains independently useful objects.",
+                      consequence: "Keep the parent pending child analysis.", confidence: 0.8,
+                      evidence: [.init(basis: .observation, label: "Mixed scope",
+                                       detail: "Children have different lifecycle states.")],
+                      investigation: .init(
+                        scope: .init(), ownership: .init(), consumers: .init(),
+                        lifecycle: .init(), recovery: .init(), sensitivity: .init(),
+                        unresolvedGaps: [], deepReviewCompleted: true,
+                        scopeKind: .heterogeneous, consumerBasis: .noneFound,
+                        decisionBasis: .mixedContainer))
+            })
+        }
+        let store = CleanupPlanStore(analyzer: analyzer)
+        store.load(list: fixture.list, snapshot: fixture.snapshot, locked: [:], hasAgentConsent: true)
+        store.startAgentAnalysis()
+        try await waitUntilFinished(store)
+
+        XCTAssertFalse(store.canConfirmPlan)
+        XCTAssertEqual(store.agentProgress?.reviewedCount, store.candidates.count)
+        XCTAssertTrue(store.recommendations.values.allSatisfy { $0.origin == .burrowSafety })
+    }
+
+    func testExternalCurrentConsumerCanNeverBeCombinedWithDelete() async throws {
+        let fixture = try makeFixture()
+        let source = root.appendingPathComponent("installed-app-config.json")
+        let targetPaths = fixture.list.categories.flatMap(\.items).map(\.path)
+        try Data(targetPaths.joined(separator: "\n").utf8).write(to: source)
+        let analyzer = FakeCleanupAnalyzer(delay: 0) { input in
+            CleanupAgentAnalysis(summary: "Contradictory delete.", recommendations: input.candidates.map {
+                .init(candidateId: $0.candidateId, disposition: .delete,
+                      reason: "Claims removal despite a current consumer.",
+                      consequence: "Would break the consumer.", confidence: 0.99,
+                      evidence: [.init(basis: .relationship, label: "Current consumer",
+                                       detail: "An installed configuration points to the candidate.")],
+                      investigation: .init(
+                        scope: .init(), ownership: .init(), consumers: .init(),
+                        lifecycle: .init(), recovery: .init(), sensitivity: .init(),
+                        unresolvedGaps: [], deepReviewCompleted: true,
+                        consumerBasis: .externalCurrent,
+                        decisionBasis: .currentConsumer,
+                        consumerReference: .init(
+                            kind: .textualPath, sourcePath: source.path,
+                            targetPath: $0.path, current: true)))
+            })
+        }
+        let store = CleanupPlanStore(analyzer: analyzer)
+        store.load(list: fixture.list, snapshot: fixture.snapshot, locked: [:], hasAgentConsent: true)
+        store.startAgentAnalysis()
+        try await waitUntilFinished(store)
+
+        XCTAssertFalse(store.canConfirmPlan)
+        XCTAssertEqual(store.agentProgress?.reviewedCount, store.candidates.count)
+        XCTAssertTrue(store.recommendations.values.allSatisfy { $0.origin == .burrowSafety })
+    }
+
+    func testInternalReferenceCannotBeRelabeledExternalCurrent() async throws {
+        let fixture = try makeFixture()
+        let analyzer = FakeCleanupAnalyzer(delay: 0) { input in
+            CleanupAgentAnalysis(summary: "False external label.", recommendations: input.candidates.map {
+                let source = URL(fileURLWithPath: $0.path).appendingPathComponent("refs-main")
+                try! Data($0.path.utf8).write(to: source)
+                return .init(
+                    candidateId: $0.candidateId, disposition: .keep,
+                    reason: "The candidate points to itself.", consequence: "No external use proven.",
+                    confidence: 0.9,
+                    evidence: [.init(basis: .observation, label: "Internal pointer",
+                                     detail: "The source lives inside the candidate.")],
+                    investigation: .init(
+                        scope: .init(), ownership: .init(), consumers: .init(),
+                        lifecycle: .init(), recovery: .init(), sensitivity: .init(),
+                        unresolvedGaps: [], deepReviewCompleted: true,
+                        consumerBasis: .externalCurrent,
+                        decisionBasis: .currentConsumer,
+                        consumerReference: .init(
+                            kind: .textualPath, sourcePath: source.path,
+                            targetPath: $0.path, current: true)))
+            })
+        }
+        let store = CleanupPlanStore(analyzer: analyzer)
+        store.load(list: fixture.list, snapshot: fixture.snapshot, locked: [:], hasAgentConsent: true)
+        store.startAgentAnalysis()
+        try await waitUntilFinished(store)
+
+        XCTAssertFalse(store.canConfirmPlan)
+        XCTAssertEqual(store.agentProgress?.reviewedCount, store.candidates.count)
+        XCTAssertTrue(store.recommendations.values.allSatisfy { $0.origin == .burrowSafety })
+    }
+
+    func testHomogeneousMixedContainerLabelCannotBypassChildRequirement() async throws {
+        let fixture = try makeFixture()
+        let analyzer = FakeCleanupAnalyzer(delay: 0) { input in
+            CleanupAgentAnalysis(summary: "Contradictory scope.", recommendations: input.candidates.map {
+                .init(candidateId: $0.candidateId, disposition: .keep,
+                      reason: "Calls a homogeneous row mixed.", consequence: "Must be rejected.",
+                      confidence: 0.8,
+                      evidence: [.init(basis: .observation, label: "Scope",
+                                       detail: "No child judgment was produced.")],
+                      investigation: .init(
+                        scope: .init(), ownership: .init(), consumers: .init(),
+                        lifecycle: .init(), recovery: .init(), sensitivity: .init(),
+                        unresolvedGaps: [], deepReviewCompleted: true,
+                        scopeKind: .homogeneous, consumerBasis: .noneFound,
+                        decisionBasis: .mixedContainer))
+            })
+        }
+        let store = CleanupPlanStore(analyzer: analyzer)
+        store.load(list: fixture.list, snapshot: fixture.snapshot, locked: [:], hasAgentConsent: true)
+        store.startAgentAnalysis()
+        try await waitUntilFinished(store)
+
+        XCTAssertFalse(store.canConfirmPlan)
+        XCTAssertEqual(store.agentProgress?.reviewedCount, store.candidates.count)
+        XCTAssertTrue(store.recommendations.values.allSatisfy { $0.origin == .burrowSafety })
+    }
+
+    func testVerifiedExternalCurrentReferenceCanCompleteKeep() async throws {
+        let fixture = try makeFixture()
+        let source = root.appendingPathComponent("installed-owner.app")
+        let targetPaths = fixture.list.categories.flatMap(\.items).map(\.path)
+        try Data(targetPaths.joined(separator: "\n").utf8).write(to: source)
+        let analyzer = FakeCleanupAnalyzer(delay: 0) { input in
+            CleanupAgentAnalysis(summary: "Verified current consumers.", recommendations: input.candidates.map {
+                .init(candidateId: $0.candidateId, disposition: .keep,
+                      reason: "An independent installed owner points to this candidate.",
+                      consequence: "Keeping preserves the active workflow.", confidence: 0.98,
+                      evidence: [.init(basis: .relationship, label: "External reference",
+                                       detail: "The source is outside the candidate.")],
+                      investigation: .init(
+                        scope: .init(), ownership: .init(), consumers: .init(),
+                        lifecycle: .init(), recovery: .init(), sensitivity: .init(),
+                        unresolvedGaps: [], deepReviewCompleted: true,
+                        consumerBasis: .externalCurrent,
+                        decisionBasis: .currentConsumer,
+                        consumerReference: .init(
+                            kind: .textualPath, sourcePath: source.path,
+                            targetPath: $0.path, current: true)))
+            })
+        }
+        let store = CleanupPlanStore(analyzer: analyzer)
+        store.load(list: fixture.list, snapshot: fixture.snapshot, locked: [:], hasAgentConsent: true)
+        store.startAgentAnalysis()
+        try await waitUntilReady(store)
+
+        XCTAssertTrue(store.canUseAgentCTA)
+        XCTAssertEqual(store.agentProgress?.reviewedCount, fixture.list.categories.flatMap(\.items).count)
+        XCTAssertTrue(store.candidates.allSatisfy { !store.isSelected($0) })
+    }
+
+    func testRelativeSymbolicLinkCanGroundExternalCurrentKeep() async throws {
+        let candidate = root.appendingPathComponent("active-model", isDirectory: true)
+        let source = root.appendingPathComponent("consumer-current")
+        try FileManager.default.createDirectory(at: candidate, withIntermediateDirectories: false)
+        try FileManager.default.createSymbolicLink(
+            atPath: source.path, withDestinationPath: candidate.lastPathComponent)
+        let list = CleanList(categories: [.init(name: "Local models", items: [
+            .init(path: candidate.path, sizeBytes: 100, sizeText: "100B", itemCount: 1),
+        ])], summaryTotalText: "100B", summaryItemCount: 1)
+        let snapshot = try CleanupSnapshot.capture(list: list, approvedRootURLs: [root])
+        let analyzer = FakeCleanupAnalyzer(delay: 0) { input in
+            CleanupAgentAnalysis(summary: "Verified symlink.", recommendations: [
+                .init(candidateId: input.candidates[0].candidateId, disposition: .keep,
+                      reason: "An external current symlink resolves to the candidate.",
+                      consequence: "Keeping preserves the active consumer.", confidence: 0.99,
+                      evidence: [.init(basis: .relationship, label: "Symlink",
+                                       detail: "The relative link resolves to this candidate.")],
+                      investigation: .init(
+                        scope: .init(), ownership: .init(), consumers: .init(),
+                        lifecycle: .init(), recovery: .init(), sensitivity: .init(),
+                        unresolvedGaps: [], deepReviewCompleted: true,
+                        consumerBasis: .externalCurrent, decisionBasis: .currentConsumer,
+                        consumerReference: .init(
+                            kind: .symbolicLink, sourcePath: source.path,
+                            targetPath: candidate.path, current: true))),
+            ])
+        }
+        let store = CleanupPlanStore(analyzer: analyzer)
+        store.load(list: list, snapshot: snapshot, locked: [:], hasAgentConsent: true)
+        store.startAgentAnalysis()
+        try await waitUntilReady(store)
+
+        XCTAssertTrue(store.canUseAgentCTA)
+        XCTAssertEqual(store.agentProgress?.reviewedCount, 1)
+    }
+
+    func testSymbolicLinkToDifferentTargetCannotGroundCurrentKeep() async throws {
+        let candidate = root.appendingPathComponent("reviewed-model", isDirectory: true)
+        let other = root.appendingPathComponent("different-model", isDirectory: true)
+        let source = root.appendingPathComponent("consumer-current")
+        try FileManager.default.createDirectory(at: candidate, withIntermediateDirectories: false)
+        try FileManager.default.createDirectory(at: other, withIntermediateDirectories: false)
+        try FileManager.default.createSymbolicLink(atPath: source.path, withDestinationPath: other.path)
+        let list = CleanList(categories: [.init(name: "Local models", items: [
+            .init(path: candidate.path, sizeBytes: 100, sizeText: "100B", itemCount: 1),
+        ])], summaryTotalText: "100B", summaryItemCount: 1)
+        let snapshot = try CleanupSnapshot.capture(list: list, approvedRootURLs: [root])
+        let analyzer = FakeCleanupAnalyzer(delay: 0) { input in
+            CleanupAgentAnalysis(summary: "Wrong target.", recommendations: [
+                .init(candidateId: input.candidates[0].candidateId, disposition: .keep,
+                      reason: "The link actually resolves elsewhere.",
+                      consequence: "Must not count as current use.", confidence: 0.99,
+                      evidence: [.init(basis: .relationship, label: "Symlink",
+                                       detail: "The declared and actual targets differ.")],
+                      investigation: .init(
+                        scope: .init(), ownership: .init(), consumers: .init(),
+                        lifecycle: .init(), recovery: .init(), sensitivity: .init(),
+                        unresolvedGaps: [], deepReviewCompleted: true,
+                        consumerBasis: .externalCurrent, decisionBasis: .currentConsumer,
+                        consumerReference: .init(
+                            kind: .symbolicLink, sourcePath: source.path,
+                            targetPath: candidate.path, current: true))),
+            ])
+        }
+        let store = CleanupPlanStore(analyzer: analyzer)
+        store.load(list: list, snapshot: snapshot, locked: [:], hasAgentConsent: true)
+        store.startAgentAnalysis()
+        try await waitUntilFinished(store)
+
+        XCTAssertEqual(store.agentProgress?.reviewedCount, store.candidates.count)
+        XCTAssertTrue(store.recommendations.values.allSatisfy { $0.origin == .burrowSafety })
+        XCTAssertFalse(store.canConfirmPlan)
+    }
+
+    func testTextualReferenceRequiresACompletePathToken() async throws {
+        let candidate = root.appendingPathComponent("model", isDirectory: true)
+        let source = root.appendingPathComponent("consumer.conf")
+        try FileManager.default.createDirectory(at: candidate, withIntermediateDirectories: false)
+        try Data((candidate.path + "-old").utf8).write(to: source)
+        let list = CleanList(categories: [.init(name: "Local models", items: [
+            .init(path: candidate.path, sizeBytes: 100, sizeText: "100B", itemCount: 1),
+        ])], summaryTotalText: "100B", summaryItemCount: 1)
+        let snapshot = try CleanupSnapshot.capture(list: list, approvedRootURLs: [root])
+        let analyzer = FakeCleanupAnalyzer(delay: 0) { input in
+            CleanupAgentAnalysis(summary: "Prefix collision.", recommendations: [
+                .init(candidateId: input.candidates[0].candidateId, disposition: .keep,
+                      reason: "A different path merely shares the target prefix.",
+                      consequence: "Must not count as a consumer.", confidence: 0.99,
+                      evidence: [.init(basis: .observation, label: "Configuration",
+                                       detail: "Only a suffixed path is present.")],
+                      investigation: .init(
+                        scope: .init(), ownership: .init(), consumers: .init(),
+                        lifecycle: .init(), recovery: .init(), sensitivity: .init(),
+                        unresolvedGaps: [], deepReviewCompleted: true,
+                        consumerBasis: .externalCurrent, decisionBasis: .currentConsumer,
+                        consumerReference: .init(
+                            kind: .textualPath, sourcePath: source.path,
+                            targetPath: candidate.path, current: true))),
+            ])
+        }
+        let store = CleanupPlanStore(analyzer: analyzer)
+        store.load(list: list, snapshot: snapshot, locked: [:], hasAgentConsent: true)
+        store.startAgentAnalysis()
+        try await waitUntilFinished(store)
+
+        XCTAssertEqual(store.agentProgress?.reviewedCount, store.candidates.count)
+        XCTAssertTrue(store.recommendations.values.allSatisfy { $0.origin == .burrowSafety })
+        XCTAssertFalse(store.canConfirmPlan)
+    }
+
+    func testConsumerReferenceCannotBeHiddenBehindAnotherBasisOrHumanIntent() async throws {
+        let fixture = try makeFixture()
+        let source = root.appendingPathComponent("consumer-config.txt")
+        let paths = fixture.list.categories.flatMap(\.items).map(\.path)
+        try Data(paths.joined(separator: "\n").utf8).write(to: source)
+        let analyzer = FakeCleanupAnalyzer(delay: 0) { input in
+            CleanupAgentAnalysis(summary: "Hidden current references.", recommendations: [
+                .init(candidateId: input.candidates[0].candidateId, disposition: .delete,
+                      reason: "Hides a current reference behind none_found.",
+                      consequence: "Would remove used content.", confidence: 1,
+                      evidence: [.init(basis: .relationship, label: "Reference",
+                                       detail: "Contradictory typed fields.")],
+                      investigation: .init(
+                        scope: .init(), ownership: .init(), consumers: .init(),
+                        lifecycle: .init(), recovery: .init(), sensitivity: .init(),
+                        unresolvedGaps: [], deepReviewCompleted: true,
+                        consumerBasis: .noneFound, decisionBasis: .unusedRecoverable,
+                        consumerReference: .init(
+                            kind: .textualPath, sourcePath: source.path,
+                            targetPath: input.candidates[0].path, current: true))),
+                .init(candidateId: input.candidates[1].candidateId,
+                      disposition: .humanIntentRequired,
+                      reason: "Hides current use as a preference.",
+                      consequence: "Would delegate a factual conflict.", confidence: 1,
+                      evidence: [.init(basis: .relationship, label: "Reference",
+                                       detail: "A current external consumer exists.")],
+                      investigation: .init(
+                        scope: .init(), ownership: .init(), consumers: .init(),
+                        lifecycle: .init(), recovery: .init(), sensitivity: .init(),
+                        unresolvedGaps: [], deepReviewCompleted: true,
+                        consumerBasis: .externalCurrent, decisionBasis: .userTradeoff,
+                        consumerReference: .init(
+                            kind: .textualPath, sourcePath: source.path,
+                            targetPath: input.candidates[1].path, current: true))),
+            ])
+        }
+        let store = CleanupPlanStore(analyzer: analyzer)
+        store.load(list: fixture.list, snapshot: fixture.snapshot, locked: [:], hasAgentConsent: true)
+        store.startAgentAnalysis()
+        try await waitUntilFinished(store)
+
+        XCTAssertFalse(store.canConfirmPlan)
+        XCTAssertEqual(store.agentProgress?.reviewedCount, store.candidates.count)
+        XCTAssertTrue(store.recommendations.values.allSatisfy { $0.origin == .burrowSafety })
     }
 
     func testAgentCannotDeleteParentThatContainsIndependentlyJudgedChildren() async throws {
@@ -386,22 +830,378 @@ final class CleanupAgentPlanTests: XCTestCase {
     func testCategoryChoiceProtectsEveryCandidateFromLateAgentMerge() async throws {
         let fixture = try makeFixture()
         let analyzer = FakeCleanupAnalyzer(delay: 80_000_000) { input in
-            CleanupAgentAnalysis(summary: "keep both", recommendations: input.candidates.map {
-                .init(candidateId: $0.candidateId, disposition: .keep,
-                      reason: "Referenced.", consequence: "Keeping preserves it.", confidence: 0.9,
-                      evidence: [.init(label: "Reference", detail: "Verified")])
+            CleanupAgentAnalysis(summary: "delete both", recommendations: input.candidates.map {
+                .init(candidateId: $0.candidateId, disposition: .delete,
+                      reason: "Rebuildable.", consequence: "Recreated on demand.", confidence: 0.9,
+                      evidence: [.init(label: "Filesystem", detail: "Verified")])
             })
         }
         let store = CleanupPlanStore(analyzer: analyzer)
         store.load(list: fixture.list, snapshot: fixture.snapshot, locked: [:], hasAgentConsent: true)
         store.startAgentAnalysis()
-        store.toggleCategory("AI Tools")
-        store.toggleCategory("AI Tools") // explicit category-level include
+        store.toggleCategory("AI Tools") // explicit category-level keep
         try await waitUntilReady(store)
 
         let candidate = try XCTUnwrap(store.candidates.first { $0.category == "AI Tools" })
         XCTAssertTrue(store.userOverrides.contains(candidate.id))
-        XCTAssertTrue(store.isSelected(candidate), "the explicit category decision wins")
+        XCTAssertFalse(store.isSelected(candidate), "the explicit category decision wins")
+    }
+
+    func testTogglingBackToAgentRecommendationRemovesOverrideAndRestoresShortcut() async throws {
+        let fixture = try makeFixture()
+        let analyzer = FakeCleanupAnalyzer(delay: 0) { input in
+            CleanupAgentAnalysis(summary: "delete both", recommendations: input.candidates.map {
+                .init(candidateId: $0.candidateId, disposition: .delete,
+                      reason: "Rebuildable.", consequence: "Recreated on demand.", confidence: 0.9,
+                      evidence: [.init(label: "Filesystem", detail: "Verified")])
+            })
+        }
+        let store = CleanupPlanStore(analyzer: analyzer)
+        store.load(list: fixture.list, snapshot: fixture.snapshot, locked: [:], hasAgentConsent: true)
+        store.startAgentAnalysis()
+        try await waitUntilReady(store)
+
+        let candidate = try XCTUnwrap(store.candidates.first)
+        store.toggleCandidate(candidate.id)
+        XCTAssertTrue(store.userOverrides.contains(candidate.id))
+        XCTAssertFalse(store.canUseAgentCTA)
+
+        store.toggleCandidate(candidate.id)
+        XCTAssertFalse(store.userOverrides.contains(candidate.id))
+        XCTAssertTrue(store.canUseAgentCTA)
+    }
+
+    func testDeleteRowsAreSortedLargestFirstWithStablePathTieBreak() async throws {
+        let small = root.appendingPathComponent("small")
+        let largeB = root.appendingPathComponent("large-b")
+        let largeA = root.appendingPathComponent("large-a")
+        for url in [small, largeB, largeA] {
+            try FileManager.default.createDirectory(at: url, withIntermediateDirectories: false)
+        }
+        let list = CleanList(categories: [.init(name: "Developer tools", items: [
+            .init(path: small.path, sizeBytes: 10, sizeText: "10B", itemCount: 1),
+            .init(path: largeB.path, sizeBytes: 50, sizeText: "50B", itemCount: 1),
+            .init(path: largeA.path, sizeBytes: 50, sizeText: "50B", itemCount: 1),
+        ])], summaryTotalText: "110B", summaryItemCount: 3)
+        let snapshot = try CleanupSnapshot.capture(list: list, approvedRootURLs: [root])
+        let analyzer = FakeCleanupAnalyzer(delay: 0) { input in
+            CleanupAgentAnalysis(summary: "ordered", recommendations: input.candidates.map {
+                .init(candidateId: $0.candidateId, disposition: .delete,
+                      reason: "Rebuildable.", consequence: "Recreated on demand.", confidence: 0.9,
+                      evidence: [.init(label: "Filesystem", detail: "Verified")])
+            })
+        }
+        let store = CleanupPlanStore(analyzer: analyzer)
+        store.load(list: list, snapshot: snapshot, locked: [:], hasAgentConsent: true)
+        store.startAgentAnalysis()
+        try await waitUntilReady(store)
+
+        let rows = try XCTUnwrap(store.sections.first { $0.disposition == .delete }).candidates
+        XCTAssertEqual(rows.map(\.path), [largeA.path, largeB.path, small.path])
+    }
+
+    func testUnknownStructuredCheckBlocksDeleteEvenWithRelationshipEvidence() async throws {
+        let fixture = try makeFixture()
+        let incomplete = CleanupAgentInvestigation(
+            scope: .init(), ownership: .init(),
+            consumers: .init(state: .unknown, detail: "Consumer index was unavailable."),
+            lifecycle: .init(), recovery: .init(), sensitivity: .init(),
+            unresolvedGaps: ["Active consumers were not verified."],
+            deepReviewCompleted: true)
+        let analyzer = FakeCleanupAnalyzer(delay: 0) { input in
+            CleanupAgentAnalysis(summary: "incomplete", recommendations: input.candidates.map {
+                .init(candidateId: $0.candidateId, disposition: .delete,
+                      reason: "Appears unused.", consequence: "Would be rebuilt.", confidence: 0.8,
+                      evidence: [.init(basis: .relationship, label: "Owner",
+                                       detail: "An owner relationship was found.")],
+                      investigation: incomplete)
+            })
+        }
+        let store = CleanupPlanStore(analyzer: analyzer)
+        store.load(list: fixture.list, snapshot: fixture.snapshot, locked: [:], hasAgentConsent: true)
+        store.startAgentAnalysis()
+        try await waitUntilFinished(store)
+
+        guard case .ready = store.agentState else {
+            return XCTFail("an unresolved structured check should close at the candidate boundary")
+        }
+        XCTAssertTrue(store.recommendations.values.allSatisfy {
+            $0.origin == .burrowSafety && $0.disposition == .keep
+        })
+        XCTAssertFalse(store.canConfirmPlan)
+    }
+
+    func testAgentDiscoveredChildIsRemeasuredPinnedAndMarkedWithoutTrustingReportedSize() async throws {
+        let parent = root.appendingPathComponent("model-cache", isDirectory: true)
+        let child = parent.appendingPathComponent("retired-model.bin")
+        try FileManager.default.createDirectory(at: parent, withIntermediateDirectories: false)
+        try Data(repeating: 0x5A, count: 16_384).write(to: child)
+        let list = CleanList(categories: [.init(name: "Local models", items: [
+            .init(path: parent.path, sizeBytes: 16_384, sizeText: "16KB", itemCount: 1),
+        ])], summaryTotalText: "16KB", summaryItemCount: 1)
+        let snapshot = try CleanupSnapshot.capture(list: list, approvedRootURLs: [root])
+        let analyzer = FakeCleanupAnalyzer(delay: 0) { input in
+            CleanupAgentAnalysis(
+                summary: "one narrower stale asset",
+                recommendations: [
+                    .init(candidateId: input.candidates[0].candidateId, disposition: .keep,
+                          reason: "The parent also contains current assets.",
+                          consequence: "Keeping it protects the current model.", confidence: 0.98,
+                          evidence: [.init(basis: .relationship, label: "Container scope",
+                                           detail: "The parent contains mixed-lifecycle assets.")],
+                          investigation: .verifiedMixedFixture),
+                ],
+                discoveredCandidates: [
+                    .init(parentCandidateId: input.candidates[0].candidateId,
+                          path: child.path, sizeBytes: 999_999_999,
+                          disposition: .delete,
+                          reason: "No installed consumer references this retired version.",
+                          consequence: "The retired model can be downloaded again.",
+                          confidence: 0.96,
+                          evidence: [.init(basis: .relationship, label: "Consumer inventory",
+                                           detail: "Current consumers reference a different model version.")],
+                          investigation: .verifiedFixture),
+                ])
+        }
+        let store = CleanupPlanStore(analyzer: analyzer)
+        store.load(list: list, snapshot: snapshot, locked: [:], hasAgentConsent: true)
+        store.startAgentAnalysis()
+        try await waitUntilReady(store)
+
+        let discovered = try XCTUnwrap(store.candidates.first { $0.path == child.path })
+        XCTAssertEqual(discovered.origin, .agentDiscovered)
+        XCTAssertNotEqual(discovered.sizeBytes, 999_999_999)
+        XCTAssertGreaterThan(discovered.sizeBytes, 0)
+        XCTAssertTrue(store.executionSnapshot?.items.contains {
+            $0.identity.path == child.path
+        } == true)
+        XCTAssertTrue(store.isSelected(discovered))
+
+        let coarseParent = try XCTUnwrap(store.candidates.first { $0.path == parent.path })
+        XCTAssertTrue(coarseParent.locked)
+        XCTAssertFalse(store.isSelected(coarseParent))
+    }
+
+    func testDuplicateAgentDiscoveredPathCannotUseFirstValidDelete() async throws {
+        let parent = root.appendingPathComponent("duplicate-model-cache", isDirectory: true)
+        let child = parent.appendingPathComponent("retired-model.bin")
+        try FileManager.default.createDirectory(at: parent, withIntermediateDirectories: false)
+        try Data(repeating: 0x31, count: 4_096).write(to: child)
+        let list = CleanList(categories: [.init(name: "Local models", items: [
+            .init(path: parent.path, sizeBytes: 4_096, sizeText: "4KB", itemCount: 1),
+        ])], summaryTotalText: "4KB", summaryItemCount: 1)
+        let snapshot = try CleanupSnapshot.capture(list: list, approvedRootURLs: [root])
+        let analyzer = FakeCleanupAnalyzer(delay: 0) { input in
+            let parentID = input.candidates[0].candidateId
+            return CleanupAgentAnalysis(
+                summary: "conflicting duplicate child",
+                recommendations: [
+                    .init(candidateId: parentID, disposition: .keep,
+                          reason: "The parent would contain independently judged children.",
+                          consequence: "Keep the coarse parent.", confidence: 0.9,
+                          evidence: [.init(basis: .observation, label: "Scope",
+                                           detail: "Mixed child lifecycle was inspected.")],
+                          investigation: .verifiedMixedFixture),
+                ],
+                discoveredCandidates: [
+                    .init(parentCandidateId: parentID, path: child.path, sizeBytes: 4_096,
+                          disposition: .delete, reason: "Observed unused.",
+                          consequence: "Can be restored.", confidence: 0.95,
+                          evidence: [.init(basis: .observation, label: "Lifecycle",
+                                           detail: "No active use was observed.")],
+                          investigation: .verifiedFixture),
+                    .init(parentCandidateId: parentID, path: child.path, sizeBytes: 4_096,
+                          disposition: .keep, reason: "Conflicting duplicate.",
+                          consequence: "Keep it.", confidence: 0.95,
+                          evidence: [.init(basis: .observation, label: "Lifecycle",
+                                           detail: "Conflicting state was returned.")],
+                          investigation: .verifiedKeepFixture),
+                ])
+        }
+        let store = CleanupPlanStore(analyzer: analyzer)
+        store.load(list: list, snapshot: snapshot, locked: [:], hasAgentConsent: true)
+        store.startAgentAnalysis()
+        try await waitUntilReady(store)
+
+        XCTAssertFalse(store.candidates.contains { $0.path == child.path })
+        let coarse = try XCTUnwrap(store.candidates.first)
+        XCTAssertEqual(store.recommendation(for: coarse.id).origin, .burrowSafety)
+        XCTAssertEqual(store.recommendation(for: coarse.id).disposition, .keep)
+        XCTAssertFalse(store.isSelected(coarse))
+    }
+
+    func testRefusedOrLockedScannerParentCannotAuthorizeAgentDiscoveredChild() async throws {
+        let safe = root.appendingPathComponent("safe-cache", isDirectory: true)
+        let sensitiveChild = root.appendingPathComponent("Documents", isDirectory: true)
+        try FileManager.default.createDirectory(at: safe, withIntermediateDirectories: false)
+        try FileManager.default.createDirectory(at: sensitiveChild, withIntermediateDirectories: false)
+        let list = CleanList(categories: [.init(name: "App caches", items: [
+            .init(path: root.path, sizeBytes: 100_000, sizeText: "100KB", itemCount: 2),
+            .init(path: safe.path, sizeBytes: 1_000, sizeText: "1KB", itemCount: 1),
+        ])], summaryTotalText: "101KB", summaryItemCount: 3)
+        let snapshot = try CleanupSnapshot.capture(list: list, approvedRootURLs: [root])
+        XCTAssertFalse(snapshot.items.contains { $0.identity.path == root.path })
+        let refusedRootPath = root.path
+        let analyzer = FakeCleanupAnalyzer(delay: 0) { input in
+            let refused = input.candidates.first { $0.path == refusedRootPath }!
+            return CleanupAgentAnalysis(
+                summary: "refused parent must stay refused",
+                recommendations: input.candidates.map {
+                    .init(candidateId: $0.candidateId,
+                          disposition: $0.candidateId == refused.candidateId ? .keep : .delete,
+                          reason: "Deterministic result.", consequence: "No widening.", confidence: 0.9,
+                          evidence: [.init(label: "Filesystem", detail: "Verified")],
+                          investigation: $0.candidateId == refused.candidateId
+                            ? .verifiedKeepFixture : .verifiedFixture)
+                },
+                discoveredCandidates: [
+                    .init(parentCandidateId: refused.candidateId,
+                          path: sensitiveChild.path, sizeBytes: 50_000,
+                          disposition: .delete, reason: "Unsafe widening attempt.",
+                          consequence: "Would delete user content.", confidence: 1,
+                          evidence: [.init(basis: .relationship, label: "Claim",
+                                           detail: "Must not be trusted.")],
+                          investigation: .verifiedFixture),
+                ])
+        }
+        let store = CleanupPlanStore(analyzer: analyzer)
+        store.load(list: list, snapshot: snapshot,
+                   locked: [root.path: .notCleanable(reason: "Refused root")],
+                   hasAgentConsent: true)
+        store.startAgentAnalysis()
+        try await waitUntilReady(store)
+
+        XCTAssertFalse(store.candidates.contains { $0.path == sensitiveChild.path })
+        XCTAssertFalse(store.executionSnapshot?.items.contains {
+            $0.identity.path == sensitiveChild.path
+        } == true)
+    }
+
+    func testSelectionEditDuringAnalysisKeepsLateDiscoveredChildUnselected() async throws {
+        let parent = root.appendingPathComponent("cache", isDirectory: true)
+        let child = parent.appendingPathComponent("old.bin")
+        try FileManager.default.createDirectory(at: parent, withIntermediateDirectories: false)
+        try Data(repeating: 1, count: 8_192).write(to: child)
+        let list = CleanList(categories: [.init(name: "Local models", items: [
+            .init(path: parent.path, sizeBytes: 8_192, sizeText: "8KB", itemCount: 1),
+        ])], summaryTotalText: "8KB", summaryItemCount: 1)
+        let snapshot = try CleanupSnapshot.capture(list: list, approvedRootURLs: [root])
+        let analyzer = FakeCleanupAnalyzer(delay: 80_000_000) { input in
+            CleanupAgentAnalysis(
+                summary: "late child",
+                recommendations: [
+                    .init(candidateId: input.candidates[0].candidateId, disposition: .keep,
+                          reason: "Mixed parent.", consequence: "Keep the container.", confidence: 0.9,
+                          evidence: [.init(label: "Scope", detail: "Verified")],
+                          investigation: .verifiedMixedFixture),
+                ],
+                discoveredCandidates: [
+                    .init(parentCandidateId: input.candidates[0].candidateId,
+                          path: child.path, sizeBytes: 8_192, disposition: .delete,
+                          reason: "Retired leaf.", consequence: "Recreated if needed.", confidence: 0.9,
+                          evidence: [.init(basis: .relationship, label: "Lifecycle",
+                                           detail: "A current replacement exists.")],
+                          investigation: .verifiedFixture),
+                ])
+        }
+        let store = CleanupPlanStore(analyzer: analyzer)
+        store.load(list: list, snapshot: snapshot, locked: [:], hasAgentConsent: true)
+        store.startAgentAnalysis()
+        store.deselectAll()
+        try await waitUntilReady(store)
+
+        let discovered = try XCTUnwrap(store.candidates.first { $0.path == child.path })
+        XCTAssertFalse(store.isSelected(discovered))
+        XCTAssertTrue(store.userOverrides.contains(discovered.id))
+        XCTAssertFalse(store.canUseAgentCTA)
+    }
+
+    func testSamePathParentReplacementCannotTransferDiscoveryAuthority() async throws {
+        let parent = root.appendingPathComponent("replaceable-cache", isDirectory: true)
+        try FileManager.default.createDirectory(at: parent, withIntermediateDirectories: false)
+        let list = CleanList(categories: [.init(name: "App caches", items: [
+            .init(path: parent.path, sizeBytes: 4_096, sizeText: "4KB", itemCount: 1),
+        ])], summaryTotalText: "4KB", summaryItemCount: 1)
+        let snapshot = try CleanupSnapshot.capture(list: list, approvedRootURLs: [root])
+        let replacementChild = parent.appendingPathComponent("new-tree.bin")
+        let analyzer = FakeCleanupAnalyzer(delay: 80_000_000) { input in
+            CleanupAgentAnalysis(
+                summary: "same path, different tree",
+                recommendations: [
+                    .init(candidateId: input.candidates[0].candidateId, disposition: .keep,
+                          reason: "Parent changed.", consequence: "Keep it.", confidence: 1,
+                          evidence: [.init(label: "Identity", detail: "Must be revalidated")],
+                          investigation: .verifiedKeepFixture),
+                ],
+                discoveredCandidates: [
+                    .init(parentCandidateId: input.candidates[0].candidateId,
+                          path: replacementChild.path, sizeBytes: 4_096,
+                          disposition: .delete, reason: "Untrusted replacement child.",
+                          consequence: "Must not enter the plan.", confidence: 1,
+                          evidence: [.init(basis: .relationship, label: "Claim",
+                                           detail: "The old identity does not authorize this tree.")],
+                          investigation: .verifiedFixture),
+                ])
+        }
+        let store = CleanupPlanStore(analyzer: analyzer)
+        store.load(list: list, snapshot: snapshot, locked: [:], hasAgentConsent: true)
+        store.startAgentAnalysis()
+
+        try FileManager.default.removeItem(at: parent)
+        try FileManager.default.createDirectory(at: parent, withIntermediateDirectories: false)
+        try Data(repeating: 7, count: 4_096).write(to: replacementChild)
+        try await waitUntilReady(store)
+
+        XCTAssertFalse(store.candidates.contains { $0.path == replacementChild.path })
+        XCTAssertFalse(store.executionSnapshot?.items.contains {
+            $0.identity.path == replacementChild.path
+        } == true)
+    }
+
+    func testParentReplacementAfterChildSnapshotStillRejectsDiscoveryMerge() async throws {
+        let parent = root.appendingPathComponent("capture-window", isDirectory: true)
+        let child = parent.appendingPathComponent("leaf.bin")
+        try FileManager.default.createDirectory(at: parent, withIntermediateDirectories: false)
+        try Data(repeating: 2, count: 4_096).write(to: child)
+        let list = CleanList(categories: [.init(name: "App caches", items: [
+            .init(path: parent.path, sizeBytes: 4_096, sizeText: "4KB", itemCount: 1),
+        ])], summaryTotalText: "4KB", summaryItemCount: 1)
+        let snapshot = try CleanupSnapshot.capture(list: list, approvedRootURLs: [root])
+        let analyzer = FakeCleanupAnalyzer(delay: 0) { input in
+            CleanupAgentAnalysis(
+                summary: "post-capture race",
+                recommendations: [
+                    .init(candidateId: input.candidates[0].candidateId, disposition: .keep,
+                          reason: "Mixed parent.", consequence: "Keep it.", confidence: 1,
+                          evidence: [.init(label: "Scope", detail: "Verified")],
+                          investigation: .verifiedKeepFixture),
+                ],
+                discoveredCandidates: [
+                    .init(parentCandidateId: input.candidates[0].candidateId,
+                          path: child.path, sizeBytes: 4_096, disposition: .delete,
+                          reason: "Old leaf.", consequence: "Recreated on demand.", confidence: 1,
+                          evidence: [.init(basis: .relationship, label: "Lifecycle",
+                                           detail: "A replacement exists.")],
+                          investigation: .verifiedFixture),
+                ])
+        }
+        var hookRan = false
+        let store = CleanupPlanStore(
+            analyzer: analyzer,
+            discoverySnapshotCapturedHook: {
+                hookRan = true
+                try! FileManager.default.removeItem(at: parent)
+                try! FileManager.default.createDirectory(at: parent,
+                                                         withIntermediateDirectories: false)
+                try! Data(repeating: 9, count: 4_096).write(to: child)
+            })
+        store.load(list: list, snapshot: snapshot, locked: [:], hasAgentConsent: true)
+        store.startAgentAnalysis()
+        try await waitUntilReady(store)
+
+        XCTAssertTrue(hookRan)
+        XCTAssertFalse(store.candidates.contains { $0.origin == .agentDiscovered })
+        XCTAssertEqual(store.executionSnapshot?.id, snapshot.id)
     }
 
     func testAgentInProgressOrDegradedCannotConfirmScannerFallback() async throws {
@@ -417,7 +1217,50 @@ final class CleanupAgentPlanTests: XCTestCase {
         XCTAssertFalse(store.canConfirmPlan)
     }
 
-    func testPartialUnknownAndDuplicateRecommendationsAreIgnoredAndDegradeShortcut() async throws {
+    func testInvalidAgentClaimForLockedCandidateConvergesToBurrowSafetyKeep() async throws {
+        let fixture = try makeFixture()
+        let lockedPath = fixture.list.categories[0].items[0].path
+        let contradictory = CleanupAgentInvestigation(
+            scope: .init(), ownership: .init(), consumers: .init(),
+            lifecycle: .init(), recovery: .init(), sensitivity: .init(),
+            unresolvedGaps: [], deepReviewCompleted: true,
+            consumerBasis: .externalCurrent,
+            decisionBasis: .currentConsumer,
+            consumerReference: .none)
+        let analyzer = FakeCleanupAnalyzer(delay: 0) { input in
+            CleanupAgentAnalysis(summary: "locked row", recommendations: input.candidates.map {
+                if $0.path == lockedPath {
+                    return .init(candidateId: $0.candidateId, disposition: .delete,
+                                 reason: "Untrusted current-consumer claim.",
+                                 consequence: "Must not control cleanup.", confidence: 1,
+                                 evidence: [.init(basis: .inference, label: "Claim",
+                                                  detail: "Unverified")],
+                                 investigation: contradictory)
+                }
+                return .init(candidateId: $0.candidateId, disposition: .keep,
+                             reason: "Verified keep.", consequence: "No change.", confidence: 0.9,
+                             evidence: [.init(basis: .observation, label: "Safety",
+                                              detail: "Verified")],
+                             investigation: .verifiedKeepFixture)
+            })
+        }
+        let store = CleanupPlanStore(analyzer: analyzer)
+        store.load(list: fixture.list, snapshot: fixture.snapshot,
+                   locked: [lockedPath: .appOpen(appName: "Messages")],
+                   hasAgentConsent: true)
+        store.startAgentAnalysis()
+        try await waitUntilReady(store)
+
+        let candidate = try XCTUnwrap(store.candidates.first { $0.path == lockedPath })
+        let result = store.recommendation(for: candidate.id)
+        XCTAssertEqual(result.origin, .burrowSafety)
+        XCTAssertEqual(result.disposition, .keep)
+        XCTAssertTrue(result.reason.contains("Messages"))
+        XCTAssertFalse(store.isSelected(candidate))
+        XCTAssertTrue(store.canUseAgentCTA)
+    }
+
+    func testPartialUnknownAndDuplicateRecommendationsBecomeConservativeKeeps() async throws {
         let fixture = try makeFixture()
         let analyzer = FakeCleanupAnalyzer(delay: 0) { input in
             let known = input.candidates[0].candidateId
@@ -427,7 +1270,8 @@ final class CleanupAgentPlanTests: XCTestCase {
                       evidence: [.init(label: "Filesystem", detail: "Verified")]),
                 .init(candidateId: known, disposition: .keep, reason: "First valid answer.",
                       consequence: "Keep.", confidence: 0.8,
-                      evidence: [.init(label: "Filesystem", detail: "Verified")]),
+                      evidence: [.init(label: "Filesystem", detail: "Verified")],
+                      investigation: .verifiedKeepFixture),
                 .init(candidateId: known, disposition: .delete, reason: "Duplicate.",
                       consequence: "Delete.", confidence: 1,
                       evidence: [.init(label: "Filesystem", detail: "Verified")]),
@@ -439,15 +1283,18 @@ final class CleanupAgentPlanTests: XCTestCase {
         try await waitUntilFinished(store)
 
         let first = store.candidates[0]
-        XCTAssertEqual(store.recommendation(for: first.id).reason, "First valid answer.")
+        XCTAssertEqual(store.recommendation(for: first.id).origin, .burrowSafety)
+        XCTAssertEqual(store.recommendation(for: first.id).disposition, .keep)
+        XCTAssertFalse(store.isSelected(first))
         XCTAssertNil(store.recommendations["unknown"])
-        XCTAssertFalse(store.canUseAgentCTA)
-        guard case .degraded(_, let reason) = store.agentState else {
-            return XCTFail("partial analysis must be visibly degraded")
+        XCTAssertTrue(store.canUseAgentCTA)
+        guard case .ready = store.agentState else {
+            return XCTFail("missing rows should be conservatively kept without blocking valid siblings")
         }
-        XCTAssertFalse(reason.isEmpty)
-        XCTAssertTrue(reason.contains("1"))
-        XCTAssertTrue(reason.contains("2"))
+        let second = store.candidates[1]
+        XCTAssertEqual(store.recommendation(for: second.id).origin, .burrowSafety)
+        XCTAssertEqual(store.recommendation(for: second.id).disposition, .keep)
+        XCTAssertFalse(store.isSelected(second))
     }
 
     func testLiveCodexReturnsSchemaValidCandidateJudgmentsWhenEnabled() async throws {

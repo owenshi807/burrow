@@ -20,6 +20,8 @@ struct CleanReviewView: View {
 
     @State private var expanded: Set<String> = []
     @State private var evidenceExpanded = false
+    @State private var agentPulse = false
+    @Environment(\.accessibilityReduceMotion) private var reduceMotion
 
     var body: some View {
         VStack(spacing: 0) {
@@ -162,18 +164,23 @@ struct CleanReviewView: View {
                         .frame(width: 30, height: 30)
                         .background(RoundedRectangle(cornerRadius: 9).fill(accent.opacity(0.13)))
                     VStack(alignment: .leading, spacing: 3) {
-                        Text(String(
-                            format: NSLocalizedString("%@ is analyzing %d candidates", comment: "cleanup Agent active title"),
-                            agent, progress.candidateCount))
+                        Text(activeAgentTitle(agent: agent, progress: progress))
                             .font(Brand.sans(13, .semibold)).foregroundStyle(Brand.textPrimary)
+                            .contentTransition(.numericText(value: Double(progress.reviewedCount ?? 0)))
+                            .animation(reduceMotion ? nil : Brand.Motion.state,
+                                       value: progress.reviewedCount)
                         Text(activeAgentDetail(progress.phase))
                             .font(Brand.sans(10)).foregroundStyle(Brand.textSecondary)
+                            .id(progress.phase)
+                            .transition(.opacity)
+                            .animation(reduceMotion ? nil : Brand.Motion.state,
+                                       value: progress.phase)
                     }
                     Spacer()
                     VStack(alignment: .trailing, spacing: 3) {
                         Text(elapsedText(progress.elapsed(at: context.date)))
                             .font(Brand.mono(11, .medium)).foregroundStyle(accent)
-                        Text(NSLocalizedString("Usually 2-5 minutes", comment: "cleanup Agent expected duration"))
+                        Text(agentDurationGuidance(progress.elapsed(at: context.date)))
                             .font(Brand.sans(9)).foregroundStyle(Brand.textTertiary)
                     }
                 }
@@ -181,7 +188,7 @@ struct CleanReviewView: View {
                 HStack(spacing: 7) {
                     agentPhase("Candidates prepared", symbol: "checkmark.circle.fill", state: .done)
                     agentPhaseConnector(done: true)
-                    agentPhase("Relationships", symbol: "point.3.connected.trianglepath.dotted",
+                    agentPhase("Triage & deep review", symbol: "point.3.connected.trianglepath.dotted",
                                state: progress.phase == .investigating ? .active : .done)
                     agentPhaseConnector(done: progress.phase != .investigating)
                     agentPhase("Plan validation", symbol: "shield.checkered",
@@ -193,7 +200,40 @@ struct CleanReviewView: View {
             .padding(13)
             .background(RoundedRectangle(cornerRadius: 14, style: .continuous).fill(accent.opacity(0.075)))
             .overlay(RoundedRectangle(cornerRadius: 14, style: .continuous).strokeBorder(accent.opacity(0.24)))
+            .onAppear { agentPulse = !reduceMotion }
+            .onDisappear { agentPulse = false }
+            .onChange(of: reduceMotion) { _, reduced in agentPulse = !reduced }
+            .onChange(of: progress.phase) { _, _ in
+                guard !reduceMotion else { agentPulse = false; return }
+                // The active capsule moves from investigation to validation.
+                // Restart its local opacity cycle so the newly active node
+                // does not inherit the previous node's settled endpoint.
+                agentPulse = false
+                Task { @MainActor in
+                    await Task.yield()
+                    guard !reduceMotion else { return }
+                    agentPulse = true
+                }
+            }
         }
+    }
+
+    private func activeAgentTitle(agent: String, progress: CleanupAgentProgress) -> String {
+        if let reviewed = progress.reviewedCount,
+           progress.phase == .investigating,
+           reviewed < progress.candidateCount {
+            return String(
+                format: NSLocalizedString("%@ has analyzed %d of %d candidates", comment: "cleanup Agent active progress title"),
+                agent, reviewed, progress.candidateCount)
+        }
+        if progress.phase == .validating {
+            return String(
+                format: NSLocalizedString("%@ is validating %d judgments", comment: "cleanup Agent validation title"),
+                agent, progress.candidateCount)
+        }
+        return String(
+            format: NSLocalizedString("%@ is analyzing %d candidates", comment: "cleanup Agent active title"),
+            agent, progress.candidateCount)
     }
 
     private func agentCompletedDisclosure(summary _: String) -> some View {
@@ -228,18 +268,41 @@ struct CleanReviewView: View {
                             state: AgentPhaseVisualState) -> some View {
         let color: Color = state == .pending ? Brand.textTertiary : accent
         return HStack(spacing: 5) {
-            Image(systemName: symbol).font(.system(size: 10, weight: .semibold))
+            Group {
+                if state == .active {
+                    if reduceMotion {
+                        Image(systemName: symbol).font(.system(size: 10, weight: .semibold))
+                    } else {
+                        ProgressView()
+                            .progressViewStyle(.circular)
+                            .controlSize(.mini)
+                            .scaleEffect(0.65)
+                    }
+                } else {
+                    Image(systemName: symbol).font(.system(size: 10, weight: .semibold))
+                }
+            }
+            .frame(width: 11, height: 11)
             Text(NSLocalizedString(title, comment: "cleanup Agent progress phase"))
                 .font(Brand.sans(9, state == .active ? .semibold : .regular))
         }
         .foregroundStyle(color)
         .padding(.horizontal, 8).padding(.vertical, 5)
-        .background(Capsule().fill(state == .active ? accent.opacity(0.14) : Color.clear))
+        .background(Capsule().fill(state == .active
+                                   ? accent.opacity(agentPulse ? 0.18 : 0.10)
+                                   : Color.clear))
+        .overlay(Capsule().strokeBorder(
+            state == .active ? accent.opacity(agentPulse ? 0.62 : 0.24) : Color.clear,
+            lineWidth: 1))
+        .animation(reduceMotion ? nil : Brand.Motion.state, value: state)
+        .animation(reduceMotion || state != .active ? nil : Brand.Motion.pulse,
+                   value: agentPulse)
     }
 
     private func agentPhaseConnector(done: Bool) -> some View {
         Rectangle().fill(done ? accent.opacity(0.65) : Brand.hairline)
             .frame(maxWidth: 22).frame(height: 1)
+            .animation(reduceMotion ? nil : Brand.Motion.state, value: done)
     }
 
     private func activeAgentDetail(_ phase: CleanupAgentProgress.Phase) -> String {
@@ -250,7 +313,7 @@ struct CleanReviewView: View {
                 comment: "cleanup Agent investigation detail")
         case .validating:
             return NSLocalizedString(
-                "Codex has returned. Burrow is applying deterministic safety rules.",
+                "Cross-checking the merged plan, then applying Burrow's deterministic safety rules.",
                 comment: "cleanup Agent validation detail")
         case .completed:
             return NSLocalizedString("Analysis complete.", comment: "cleanup Agent completed detail")
@@ -260,17 +323,34 @@ struct CleanReviewView: View {
     private func agentProgressAccessibility(_ progress: CleanupAgentProgress) -> String {
         let phase: String
         switch progress.phase {
-        case .investigating: phase = NSLocalizedString("Relationships in progress", comment: "")
+        case .investigating: phase = NSLocalizedString("Triage and deep review in progress", comment: "")
         case .validating: phase = NSLocalizedString("Safety check in progress", comment: "")
         case .completed: phase = NSLocalizedString("Analysis complete", comment: "")
         }
-        return String(format: NSLocalizedString("%@, %@ elapsed", comment: "cleanup Agent progress accessibility"),
-                      phase, elapsedText(progress.elapsed()))
+        if let reviewed = progress.reviewedCount, progress.phase == .investigating {
+            return String(
+                format: NSLocalizedString("%@, %d of %d candidates reviewed, %@ elapsed", comment: "cleanup Agent progress accessibility with count"),
+                phase, reviewed, progress.candidateCount, elapsedText(progress.elapsed()))
+        }
+        return String(
+            format: NSLocalizedString("%@, %@ elapsed", comment: "cleanup Agent progress accessibility"),
+            phase, elapsedText(progress.elapsed()))
     }
 
     private func elapsedText(_ interval: TimeInterval) -> String {
         let seconds = max(0, Int(interval))
         return String(format: "%d:%02d", seconds / 60, seconds % 60)
+    }
+
+    private func agentDurationGuidance(_ elapsed: TimeInterval) -> String {
+        if elapsed >= 300 {
+            return NSLocalizedString(
+                "Still working — time varies with scan scope",
+                comment: "cleanup Agent long-running duration guidance")
+        }
+        return NSLocalizedString(
+            "Deep review may take several minutes",
+            comment: "cleanup Agent duration guidance")
     }
 
     private func iconButton(_ symbol: String, help: String, action: @escaping () -> Void) -> some View {
@@ -286,12 +366,17 @@ struct CleanReviewView: View {
     private func decisionHeader(_ disposition: CleanupRecommendationDisposition,
                                 sections: [CleanupDecisionSection]) -> some View {
         let candidates = sections.flatMap(\.candidates)
+        let bytes = candidates.reduce(Int64(0)) { $0 + $1.sizeBytes }
         return HStack(alignment: .firstTextBaseline, spacing: 8) {
             Text(disposition.title).font(Brand.sans(14, .semibold)).foregroundStyle(Brand.textPrimary)
             Text("\(candidates.count)").font(Brand.mono(10, .medium)).foregroundStyle(disposition.color)
+                .contentTransition(.numericText(value: Double(candidates.count)))
+                .animation(reduceMotion ? nil : Brand.Motion.state, value: candidates.count)
             Spacer()
-            Text(Fmt.bytes(candidates.reduce(0) { $0 + $1.sizeBytes }))
+            Text(Fmt.bytes(bytes))
                 .font(Brand.mono(11)).foregroundStyle(Brand.textSecondary)
+                .contentTransition(.numericText(value: Double(bytes)))
+                .animation(reduceMotion ? nil : Brand.Motion.state, value: bytes)
         }.padding(.top, 3)
     }
 
@@ -324,6 +409,10 @@ struct CleanReviewView: View {
                                 section.candidates.count
                             ))
                                 .font(Brand.mono(10)).foregroundStyle(Brand.textTertiary)
+                                .contentTransition(.numericText(value: Double(
+                                    planStore.selectedCount(in: section.candidates))))
+                                .animation(reduceMotion ? nil : Brand.Motion.state,
+                                           value: planStore.selectedCount(in: section.candidates))
                         }
                         Text(Self.consequence(for: section.category))
                             .font(Brand.sans(10)).foregroundStyle(Brand.textSecondary)
@@ -331,9 +420,12 @@ struct CleanReviewView: View {
                     Spacer()
                     Text("\(Fmt.bytes(selectedBytes)) / \(Fmt.bytes(totalBytes))")
                         .font(Brand.mono(11, .medium)).foregroundStyle(Brand.blue)
+                        .contentTransition(.numericText(value: Double(selectedBytes)))
+                        .animation(reduceMotion ? nil : Brand.Motion.state, value: selectedBytes)
                     Image(systemName: "chevron.right")
                         .font(.system(size: 10, weight: .semibold)).foregroundStyle(Brand.textTertiary)
                         .rotationEffect(.degrees(isOpen ? 90 : 0))
+                        .animation(reduceMotion ? nil : Brand.Motion.disclosure, value: isOpen)
                     }
                     .contentShape(Rectangle())
                 }
@@ -418,6 +510,10 @@ struct CleanReviewView: View {
             Chip(text: NSLocalizedString("Protected", comment: ""), color: Brand.amber)
         } else if planStore.userOverrides.contains(candidate.id) {
             Chip(text: NSLocalizedString("Your choice", comment: ""), color: Brand.amber)
+        } else if candidate.origin == .agentDiscovered {
+            Chip(text: NSLocalizedString("Agent discovered", comment: ""), color: Brand.blue)
+        } else if recommendation.origin == .burrowSafety {
+            Chip(text: NSLocalizedString("Conservative keep", comment: ""), color: Brand.amber)
         } else if recommendation.origin == .agent {
             Chip(text: recommendation.disposition.shortTitle, color: recommendation.disposition.color)
         } else {
@@ -485,9 +581,41 @@ struct CleanReviewView: View {
                                                 .fixedSize(horizontal: false, vertical: true)
                                         }
                                     }
+                                    if let investigation = recommendation.investigation {
+                                        Rectangle().fill(Brand.hairline).frame(height: 1)
+                                        ForEach(Array(investigationMetadataRows(investigation).enumerated()),
+                                                id: \.offset) { _, row in
+                                            HStack(alignment: .firstTextBaseline, spacing: 8) {
+                                                Text(row.0).font(Brand.sans(10, .semibold))
+                                                    .foregroundStyle(Brand.textPrimary)
+                                                Spacer(minLength: 8)
+                                                Text(row.1).font(Brand.mono(8, .semibold))
+                                                    .foregroundStyle(Brand.textSecondary)
+                                                    .padding(.horizontal, 6).padding(.vertical, 3)
+                                                    .background(Capsule().fill(Brand.textSecondary.opacity(0.10)))
+                                            }
+                                        }
+                                        ForEach(Array(investigationRows(investigation).enumerated()), id: \.offset) { _, row in
+                                            VStack(alignment: .leading, spacing: 2) {
+                                                HStack(spacing: 6) {
+                                                    Text(row.1.state.title)
+                                                        .font(Brand.mono(8, .semibold))
+                                                        .foregroundStyle(row.1.state.color)
+                                                        .padding(.horizontal, 5).padding(.vertical, 2)
+                                                        .background(Capsule().fill(row.1.state.color.opacity(0.12)))
+                                                    Text(row.0).font(Brand.sans(10, .semibold))
+                                                        .foregroundStyle(Brand.textPrimary)
+                                                }
+                                                Text(row.1.detail).font(Brand.sans(10))
+                                                    .foregroundStyle(Brand.textSecondary)
+                                                    .fixedSize(horizontal: false, vertical: true)
+                                            }
+                                        }
+                                    }
                                 }.padding(.top, 9)
                             } label: {
-                                Text(String(format: NSLocalizedString("Evidence and relationships · %d", comment: ""), recommendation.evidence.count))
+                                Text(String(format: NSLocalizedString("Evidence and checks · %d", comment: ""),
+                                            recommendation.evidence.count + (recommendation.investigation == nil ? 0 : 9)))
                                     .font(Brand.sans(11, .semibold)).foregroundStyle(Brand.textSecondary)
                             }.tint(accent)
                         }
@@ -600,6 +728,9 @@ struct CleanReviewView: View {
                 planStore.totalCount
             ))
                 .font(Brand.mono(11)).foregroundStyle(Brand.textSecondary)
+                .contentTransition(.numericText(value: Double(planStore.selectedCount)))
+                .animation(reduceMotion ? nil : Brand.Motion.state,
+                           value: planStore.selectedCount)
             if !planStore.userOverrides.isEmpty {
                 Text(String(format: NSLocalizedString("%d manual changes", comment: ""), planStore.userOverrides.count))
                     .font(Brand.mono(9)).foregroundStyle(Brand.amber)
@@ -609,6 +740,9 @@ struct CleanReviewView: View {
                 if let selection = planStore.selection { onConfirm(selection) }
             } label: {
                 Text(pillLabel).font(Brand.sans(13, .semibold)).foregroundStyle(.black)
+                    .contentTransition(.numericText(value: Double(planStore.selectedBytes)))
+                    .animation(reduceMotion ? nil : Brand.Motion.state,
+                               value: planStore.selectedBytes)
                     .padding(.horizontal, 20).padding(.vertical, 10)
                     .background(Capsule().fill(Color.white))
             }
@@ -682,6 +816,43 @@ struct CleanReviewView: View {
             return NSLocalizedString("Cache files. Regenerated as needed.", comment: "")
         }
     }
+
+    private func investigationRows(
+        _ investigation: CleanupAgentInvestigation
+    ) -> [(String, CleanupAgentCheck)] {
+        [
+            (NSLocalizedString("Scope", comment: "cleanup investigation check"), investigation.scope),
+            (NSLocalizedString("Ownership", comment: "cleanup investigation check"), investigation.ownership),
+            (NSLocalizedString("Consumers", comment: "cleanup investigation check"), investigation.consumers),
+            (NSLocalizedString("Lifecycle", comment: "cleanup investigation check"), investigation.lifecycle),
+            (NSLocalizedString("Recovery", comment: "cleanup investigation check"), investigation.recovery),
+            (NSLocalizedString("Sensitivity", comment: "cleanup investigation check"), investigation.sensitivity),
+        ]
+    }
+
+    private func investigationMetadataRows(
+        _ investigation: CleanupAgentInvestigation
+    ) -> [(String, String)] {
+        var rows = [
+            (NSLocalizedString("Scope type", comment: "cleanup investigation metadata"),
+             investigation.scopeKind.title),
+            (NSLocalizedString("Consumer evidence", comment: "cleanup investigation metadata"),
+             investigation.consumerBasis.title),
+            (NSLocalizedString("Decision basis", comment: "cleanup investigation metadata"),
+             investigation.decisionBasis.title),
+        ]
+        if !investigation.consumerReference.sourcePath.isEmpty {
+            rows.append((
+                NSLocalizedString("Consumer source", comment: "cleanup investigation metadata"),
+                NSString(string: investigation.consumerReference.sourcePath).abbreviatingWithTildeInPath))
+        }
+        if !investigation.consumerReference.targetPath.isEmpty {
+            rows.append((
+                NSLocalizedString("Consumer target", comment: "cleanup investigation metadata"),
+                NSString(string: investigation.consumerReference.targetPath).abbreviatingWithTildeInPath))
+        }
+        return rows
+    }
 }
 
 private extension View {
@@ -741,6 +912,59 @@ private extension CleanupAgentEvidenceBasis {
         case .observation, .relationship: return Tool.clean.accent
         case .inference: return Brand.blue
         case .gap: return Brand.amber
+        }
+    }
+}
+
+private extension CleanupAgentCheckState {
+    var title: String {
+        switch self {
+        case .verified: return NSLocalizedString("Verified", comment: "cleanup investigation state")
+        case .notApplicable: return NSLocalizedString("N/A", comment: "cleanup investigation state")
+        case .unknown: return NSLocalizedString("Not verified", comment: "cleanup investigation state")
+        }
+    }
+
+    var color: Color {
+        switch self {
+        case .verified: return Tool.clean.accent
+        case .notApplicable: return Brand.textTertiary
+        case .unknown: return Brand.amber
+        }
+    }
+}
+
+private extension CleanupAgentScopeKind {
+    var title: String {
+        switch self {
+        case .homogeneous: return NSLocalizedString("Homogeneous", comment: "cleanup scope kind")
+        case .heterogeneous: return NSLocalizedString("Heterogeneous", comment: "cleanup scope kind")
+        case .unknown: return NSLocalizedString("Unknown", comment: "cleanup scope kind")
+        }
+    }
+}
+
+private extension CleanupAgentConsumerBasis {
+    var title: String {
+        switch self {
+        case .externalCurrent: return NSLocalizedString("External · current", comment: "cleanup consumer basis")
+        case .externalInactive: return NSLocalizedString("External · inactive", comment: "cleanup consumer basis")
+        case .internalOnly: return NSLocalizedString("Internal only", comment: "cleanup consumer basis")
+        case .noneFound: return NSLocalizedString("None found", comment: "cleanup consumer basis")
+        case .unknown: return NSLocalizedString("Unknown", comment: "cleanup consumer basis")
+        }
+    }
+}
+
+private extension CleanupAgentDecisionBasis {
+    var title: String {
+        switch self {
+        case .currentConsumer: return NSLocalizedString("Current consumer", comment: "cleanup decision basis")
+        case .mixedContainer: return NSLocalizedString("Mixed container", comment: "cleanup decision basis")
+        case .incompleteInvestigation: return NSLocalizedString("Incomplete review", comment: "cleanup decision basis")
+        case .userTradeoff: return NSLocalizedString("User tradeoff", comment: "cleanup decision basis")
+        case .unusedRecoverable: return NSLocalizedString("Unused · recoverable", comment: "cleanup decision basis")
+        case .sensitiveOrIrreplaceable: return NSLocalizedString("Sensitive or irreplaceable", comment: "cleanup decision basis")
         }
     }
 }

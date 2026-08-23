@@ -45,6 +45,17 @@ extension Color {
 }
 
 enum Brand {
+    enum Motion {
+        /// State feedback and event-driven number changes: fast, responsive,
+        /// and strong enough to read without making the dashboard feel soft.
+        static let state = Animation.timingCurve(0.23, 1, 0.32, 1, duration: 0.18)
+        /// On-screen disclosure cues retarget smoothly when interrupted.
+        static let disclosure = Animation.timingCurve(0.77, 0, 0.175, 1, duration: 0.16)
+        /// Repeating work indicator. Callers must disable it for Reduce Motion.
+        static let pulse = Animation.easeInOut(duration: 0.7)
+            .repeatForever(autoreverses: true)
+    }
+
     // MARK: Ground — warm coffee (dark) / warm paper (light)
     static let base      = Color.adaptive(0x17120A, 0xF4EFE6)
     static let baseSoft  = Color.adaptive(0x211A11, 0xFCF9F3)
