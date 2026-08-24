@@ -1408,6 +1408,72 @@ final class CleanupAgentPlanTests: XCTestCase {
         XCTAssertFalse(store.isSelected(second))
     }
 
+    func testCandidateReassessmentSendsAndUpdatesOnlyTheSelectedCandidate() async throws {
+        let fixture = try makeFixture()
+        let analyzer = FakeCleanupAnalyzer(delay: 40_000_000) { input in
+            XCTAssertEqual(input.candidates.count, 1)
+            return CleanupAgentAnalysis(summary: "single row", recommendations: [
+                .init(candidateId: input.candidates[0].candidateId, disposition: .keep,
+                      reason: "Current consumer verified.", consequence: "Keep it in place.",
+                      confidence: 0.96,
+                      evidence: [.init(basis: .observation, label: "Reference", detail: "Verified")],
+                      investigation: .verifiedKeepFixture),
+            ])
+        }
+        let store = CleanupPlanStore(analyzer: analyzer)
+        store.load(list: fixture.list, snapshot: fixture.snapshot, locked: [:], hasAgentConsent: true)
+        let target = store.candidates[0]
+        let untouched = store.candidates[1]
+
+        store.startCandidateReassessment(target.id)
+
+        XCTAssertTrue(store.isReassessingCandidate(target.id))
+        XCTAssertFalse(store.isReassessingCandidate(untouched.id))
+        guard case .idle = store.agentState else {
+            return XCTFail("a row-level task must not replace the plan-wide status")
+        }
+        try await waitUntilCandidateFinished(store)
+
+        XCTAssertEqual(store.recommendation(for: target.id).origin, .agent)
+        XCTAssertEqual(store.recommendation(for: target.id).disposition, .keep)
+        XCTAssertFalse(store.isSelected(target))
+        XCTAssertEqual(store.recommendation(for: untouched.id).origin, .scanner)
+        XCTAssertEqual(store.recommendation(for: untouched.id).disposition, .delete)
+        XCTAssertTrue(store.isSelected(untouched))
+        guard case .idle = store.agentState else {
+            return XCTFail("completing one row must not claim a full-plan review")
+        }
+    }
+
+    func testStoppingCandidateReassessmentPreservesThePreviousJudgment() async throws {
+        let fixture = try makeFixture()
+        let analyzer = FakeCleanupAnalyzer(delay: 1_000_000_000) { input in
+            CleanupAgentAnalysis(summary: "late", recommendations: input.candidates.map {
+                .init(candidateId: $0.candidateId, disposition: .keep,
+                      reason: "Late result.", consequence: "Must never land.", confidence: 1,
+                      evidence: [.init(label: "Late", detail: "Cancelled")],
+                      investigation: .verifiedKeepFixture)
+            })
+        }
+        let store = CleanupPlanStore(analyzer: analyzer)
+        store.load(list: fixture.list, snapshot: fixture.snapshot, locked: [:], hasAgentConsent: true)
+        let target = store.candidates[0]
+
+        store.startCandidateReassessment(target.id)
+        store.stopAgentAnalysis()
+
+        guard case .stopped(let candidateId, _) = store.candidateAgentState else {
+            return XCTFail("the stopped state must remain attached to the target row")
+        }
+        XCTAssertEqual(candidateId, target.id)
+        XCTAssertEqual(store.recommendation(for: target.id).origin, .scanner)
+        XCTAssertTrue(store.isSelected(target))
+        XCTAssertTrue(store.canConfirmPlan)
+        guard case .idle = store.agentState else {
+            return XCTFail("stopping one row must not stop the plan-wide review state")
+        }
+    }
+
     func testLiveCodexReturnsSchemaValidCandidateJudgmentsWhenEnabled() async throws {
         guard Foundation.ProcessInfo.processInfo.environment["BURROW_RUN_CODEX_INTEGRATION"] == "1" else {
             throw XCTSkip("Set BURROW_RUN_CODEX_INTEGRATION=1 for the authenticated Codex smoke test")
@@ -1474,6 +1540,14 @@ final class CleanupAgentPlanTests: XCTestCase {
             try await Task.sleep(nanoseconds: 10_000_000)
         }
         XCTFail("Agent analysis timed out")
+    }
+
+    private func waitUntilCandidateFinished(_ store: CleanupPlanStore) async throws {
+        for _ in 0..<100 {
+            if !store.hasActiveAgentAnalysis { return }
+            try await Task.sleep(nanoseconds: 10_000_000)
+        }
+        XCTFail("Candidate reassessment timed out")
     }
 
     private func waitUntilProgress(_ store: CleanupPlanStore,

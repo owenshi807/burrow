@@ -410,6 +410,17 @@ final class CleanupPlanStore: ObservableObject {
         case degraded(agent: String, reason: String)
     }
 
+    enum CandidateAgentState: Equatable {
+        case analyzing(candidateId: String, agent: String)
+        case stopped(candidateId: String, agent: String)
+        case failed(candidateId: String, agent: String, reason: String)
+    }
+
+    private enum AgentRunScope: Equatable, Sendable {
+        case fullPlan
+        case candidate(String)
+    }
+
     @Published private(set) var planId = UUID()
     @Published private(set) var snapshotCreatedAt = Date()
     @Published private(set) var revision = 0
@@ -418,6 +429,7 @@ final class CleanupPlanStore: ObservableObject {
     @Published private(set) var selection: CleanSelection?
     @Published private(set) var selectedCandidateId: String?
     @Published private(set) var agentState: AgentState = .idle
+    @Published private(set) var candidateAgentState: CandidateAgentState?
     @Published private(set) var agentProgress: CleanupAgentProgress?
     @Published private(set) var userOverrides: Set<String> = []
     @Published private(set) var executionSnapshot: CleanupSnapshot?
@@ -425,6 +437,7 @@ final class CleanupPlanStore: ObservableObject {
     private var pathToCandidateId: [String: String] = [:]
     private var currentLocks: [String: CleanSelection.LockReason] = [:]
     private var currentAgentRunId: UUID?
+    private var currentAgentRunScope: AgentRunScope?
     private var currentAgentRunBaseRevision: Int?
     private var analysisTask: Task<Void, Never>?
     private let analyzer: any CleanupAgentAnalyzing
@@ -453,8 +466,10 @@ final class CleanupPlanStore: ObservableObject {
         revision = 1
         userOverrides = []
         currentAgentRunId = nil
+        currentAgentRunScope = nil
         currentAgentRunBaseRevision = nil
         agentProgress = nil
+        candidateAgentState = nil
         executionSnapshot = snapshot
         // Paths are the identity shared by selection, authorization and the
         // Agent. The scanner has emitted duplicate paths in production, so
@@ -521,17 +536,34 @@ final class CleanupPlanStore: ObservableObject {
     }
 
     func startAgentAnalysis() {
-        guard !candidates.isEmpty else { return }
+        beginAgentAnalysis(scope: .fullPlan)
+    }
+
+    func startCandidateReassessment(_ candidateId: String) {
+        guard candidates.contains(where: { $0.id == candidateId }) else { return }
+        beginAgentAnalysis(scope: .candidate(candidateId))
+    }
+
+    private func beginAgentAnalysis(scope: AgentRunScope) {
+        let runCandidates: [CleanupPlanCandidate]
+        switch scope {
+        case .fullPlan:
+            runCandidates = candidates
+        case .candidate(let candidateId):
+            runCandidates = candidates.filter { $0.id == candidateId }
+        }
+        guard !runCandidates.isEmpty else { return }
         analysisTask?.cancel()
         let runId = UUID()
         currentAgentRunId = runId
+        currentAgentRunScope = scope
         let baseRevision = revision
         currentAgentRunBaseRevision = baseRevision
-        let totalBytes = max(Int64(1), candidates.reduce(0) { $0 + $1.sizeBytes })
+        let totalBytes = max(Int64(1), runCandidates.reduce(0) { $0 + $1.sizeBytes })
         let input = CleanupAgentAnalysisInput(
             planId: planId.uuidString,
             planRevision: baseRevision,
-            candidates: candidates.map { candidate in
+            candidates: runCandidates.map { candidate in
                 CleanupAgentCandidateInput(
                     candidateId: candidate.id,
                     path: candidate.path,
@@ -540,19 +572,27 @@ final class CleanupPlanStore: ObservableObject {
                     itemCount: candidate.itemCount,
                     runningApp: currentLocks[candidate.path].map(Self.lockReasonText),
                     sensitivePathHint: SensitiveRemnantMatcher.isSensitive(candidate.path),
-                    deepReviewRequired: candidate.locked
+                    deepReviewRequired: scope != .fullPlan
+                        || candidate.locked
                         || SensitiveRemnantMatcher.isSensitive(candidate.path)
                         || candidate.sizeBytes >= 512 * 1_024 * 1_024
                         || candidate.sizeBytes * 10 >= totalBytes
-                        || candidates.contains(where: {
+                        || runCandidates.contains(where: {
                             $0.id != candidate.id
                                 && $0.path.hasPrefix(candidate.path.hasSuffix("/")
                                     ? candidate.path : candidate.path + "/")
                         }))
             })
-        agentState = .analyzing(agent: analyzer.displayName)
+        switch scope {
+        case .fullPlan:
+            candidateAgentState = nil
+            agentState = .analyzing(agent: analyzer.displayName)
+        case .candidate(let candidateId):
+            candidateAgentState = .analyzing(
+                candidateId: candidateId, agent: analyzer.displayName)
+        }
         agentProgress = CleanupAgentProgress(
-            startedAt: Date(), candidateCount: candidates.count,
+            startedAt: Date(), candidateCount: runCandidates.count,
             phase: .routing, reviewedCount: nil, finishedAt: nil)
         let timeout = analysisTimeoutNanoseconds
         let progressTarget = WeakCleanupPlanStore(self)
@@ -570,7 +610,22 @@ final class CleanupPlanStore: ObservableObject {
                             }
                         }
                     })
-                guard let scoped = self?.prevalidatedDiscoveryScope(in: analysis) else { return }
+                guard let prevalidated = self?.prevalidatedDiscoveryScope(in: analysis) else { return }
+                let scoped: CleanupAgentAnalysis
+                switch scope {
+                case .fullPlan:
+                    scoped = prevalidated
+                case .candidate:
+                    // A row-level reassessment may inspect descendants for
+                    // evidence, but it is authorized to update exactly the
+                    // selected scanner candidate and cannot grow the plan.
+                    scoped = CleanupAgentAnalysis(
+                        summary: prevalidated.summary,
+                        recommendations: prevalidated.recommendations,
+                        discoveredCandidates: [],
+                        passThroughCandidateIDs: prevalidated.passThroughCandidateIDs,
+                        unresolvedCandidateIDs: prevalidated.unresolvedCandidateIDs)
+                }
                 let measurementTask = Task.detached(priority: .utility) {
                     Self.measuringDiscoveredCandidates(in: scoped)
                 }
@@ -586,10 +641,10 @@ final class CleanupPlanStore: ObservableObject {
                 // without pretending that it represents a percentage.
                 try await Task.sleep(nanoseconds: 240_000_000)
                 guard !Task.isCancelled else { return }
-                self?.apply(measured, runId: runId)
+                self?.apply(measured, runId: runId, scope: scope)
             } catch {
                 guard !Task.isCancelled else { return }
-                self?.finishDegraded(error, runId: runId)
+                self?.finishDegraded(error, runId: runId, scope: scope)
             }
         }
     }
@@ -599,13 +654,27 @@ final class CleanupPlanStore: ObservableObject {
     /// from ever reaching `apply`; the adapter cancellation handler terminates
     /// every registered Codex child process.
     func stopAgentAnalysis() {
-        guard case .analyzing = agentState else { return }
+        guard let scope = currentAgentRunScope else { return }
         currentAgentRunId = nil
+        currentAgentRunScope = nil
         currentAgentRunBaseRevision = nil
         analysisTask?.cancel()
         analysisTask = nil
         agentProgress?.finishedAt = Date()
-        agentState = .stopped(agent: analyzer.displayName)
+        switch scope {
+        case .fullPlan:
+            agentState = .stopped(agent: analyzer.displayName)
+        case .candidate(let candidateId):
+            candidateAgentState = .stopped(
+                candidateId: candidateId, agent: analyzer.displayName)
+        }
+    }
+
+    var hasActiveAgentAnalysis: Bool { currentAgentRunId != nil }
+
+    func isReassessingCandidate(_ candidateId: String) -> Bool {
+        guard case .analyzing(let activeId, _) = candidateAgentState else { return false }
+        return activeId == candidateId
     }
 
     func selectCandidate(_ id: String) { selectedCandidateId = id }
@@ -734,9 +803,9 @@ final class CleanupPlanStore: ObservableObject {
     }
 
     var canConfirmPlan: Bool {
-        guard selectedCount > 0 else { return false }
+        guard selectedCount > 0, !hasActiveAgentAnalysis else { return false }
         switch agentState {
-        case .analyzing, .degraded:
+        case .degraded:
             return false
         default:
             return true
@@ -779,11 +848,24 @@ final class CleanupPlanStore: ObservableObject {
         }
     }
 
-    private func apply(_ analysis: CleanupAgentAnalysis, runId: UUID) {
-        guard currentAgentRunId == runId else { return }
-        let discoveredRecommendations = integrateDiscoveredCandidates(
-            analysis.discoveredCandidates, runId: runId)
-        let known = Set(candidates.map(\.id))
+    private func apply(_ analysis: CleanupAgentAnalysis, runId: UUID, scope: AgentRunScope) {
+        guard currentAgentRunId == runId, currentAgentRunScope == scope else { return }
+        let discoveredRecommendations: [CleanupAgentRecommendation]
+        switch scope {
+        case .fullPlan:
+            discoveredRecommendations = integrateDiscoveredCandidates(
+                analysis.discoveredCandidates, runId: runId)
+        case .candidate:
+            discoveredRecommendations = []
+        }
+        let scopedCandidates: [CleanupPlanCandidate]
+        switch scope {
+        case .fullPlan:
+            scopedCandidates = candidates
+        case .candidate(let candidateId):
+            scopedCandidates = candidates.filter { $0.id == candidateId }
+        }
+        let known = Set(scopedCandidates.map(\.id))
         var seen = Set<String>()
         var resolved = Set<String>()
         var accepted = 0
@@ -847,7 +929,7 @@ final class CleanupPlanStore: ObservableObject {
             grouping: analysis.passThroughCandidateIDs, by: { $0 }).mapValues(\.count)
         let unresolvedCounts = Dictionary(
             grouping: analysis.unresolvedCandidateIDs, by: { $0 }).mapValues(\.count)
-        let scannerCandidateIDs = Set(candidates.lazy
+        let scannerCandidateIDs = Set(scopedCandidates.lazy
             .filter { $0.origin == .scanner }.map(\.id))
         let routedScannerIDs = Set(analysis.recommendations.map(\.candidateId))
             .union(analysis.passThroughCandidateIDs)
@@ -858,7 +940,7 @@ final class CleanupPlanStore: ObservableObject {
         // overlapping, or missing routing can only shrink the deletion plan.
         // A foreign ID proves the purported partition is not exact, so every
         // scanner row fails closed rather than trusting a shifted/mixed plan.
-        for candidate in candidates where candidate.origin == .scanner {
+        for candidate in scopedCandidates where candidate.origin == .scanner {
             let proposalCount = directProposalCounts[candidate.id, default: 0]
             let passThroughCount = passThroughCounts[candidate.id, default: 0]
             let unresolvedCount = unresolvedCounts[candidate.id, default: 0]
@@ -1011,7 +1093,7 @@ final class CleanupPlanStore: ObservableObject {
         // candidate boundary. A missing judgment can only shrink the staged
         // deletion set; it never forces unrelated valid recommendations into
         // a plan-wide degraded state.
-        for candidate in candidates where !resolved.contains(candidate.id) {
+        for candidate in scopedCandidates where !resolved.contains(candidate.id) {
             let reason = NSLocalizedString(
                 "Codex did not return a complete judgment for this item.",
                 comment: "missing Agent judgment conservative keep reason")
@@ -1039,25 +1121,34 @@ final class CleanupPlanStore: ObservableObject {
         agentProgress?.phase = .completed
         agentProgress?.reviewedCount = accepted
         agentProgress?.finishedAt = Date()
-        if accepted == candidates.count {
-            agentState = .ready(agent: analyzer.displayName, summary: overallRecommendationText)
-        } else if accepted > 0 {
-            agentState = .degraded(
-                agent: analyzer.displayName,
-                reason: String(
-                    format: NSLocalizedString(
-                        "The Agent judged %d of %d candidates. Burrow kept the scanner result for the rest and disabled the Agent shortcut.",
-                        comment: "partial Agent analysis"
-                    ),
-                    accepted,
-                    candidates.count
+        currentAgentRunId = nil
+        currentAgentRunScope = nil
+        currentAgentRunBaseRevision = nil
+        analysisTask = nil
+        switch scope {
+        case .candidate:
+            candidateAgentState = nil
+        case .fullPlan:
+            if accepted == scopedCandidates.count {
+                agentState = .ready(agent: analyzer.displayName, summary: overallRecommendationText)
+            } else if accepted > 0 {
+                agentState = .degraded(
+                    agent: analyzer.displayName,
+                    reason: String(
+                        format: NSLocalizedString(
+                            "The Agent judged %d of %d candidates. Burrow kept the scanner result for the rest and disabled the Agent shortcut.",
+                            comment: "partial Agent analysis"
+                        ),
+                        accepted,
+                        scopedCandidates.count
+                    )
                 )
-            )
-        } else {
-            agentState = .degraded(
-                agent: analyzer.displayName,
-                reason: NSLocalizedString("The Agent returned no valid candidate judgments.", comment: "")
-            )
+            } else {
+                agentState = .degraded(
+                    agent: analyzer.displayName,
+                    reason: NSLocalizedString("The Agent returned no valid candidate judgments.", comment: "")
+                )
+            }
         }
     }
 
@@ -1459,10 +1550,22 @@ final class CleanupPlanStore: ObservableObject {
         })
     }
 
-    private func finishDegraded(_ error: Error, runId: UUID) {
-        guard currentAgentRunId == runId else { return }
+    private func finishDegraded(_ error: Error, runId: UUID, scope: AgentRunScope) {
+        guard currentAgentRunId == runId, currentAgentRunScope == scope else { return }
         agentProgress?.finishedAt = Date()
-        agentState = .degraded(agent: analyzer.displayName, reason: error.localizedDescription)
+        currentAgentRunId = nil
+        currentAgentRunScope = nil
+        currentAgentRunBaseRevision = nil
+        analysisTask = nil
+        switch scope {
+        case .fullPlan:
+            agentState = .degraded(agent: analyzer.displayName, reason: error.localizedDescription)
+        case .candidate(let candidateId):
+            candidateAgentState = .failed(
+                candidateId: candidateId,
+                agent: analyzer.displayName,
+                reason: error.localizedDescription)
+        }
     }
 
     private func markValidating(runId: UUID) {

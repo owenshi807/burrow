@@ -1050,3 +1050,8 @@
 "Agent investigation unresolved" = "Agent 调查未解决";
 "Current decision: You · Original source: %@" = "当前决定：你 · 原始来源：%@";
 "Decision source: %@" = "判断来源：%@";
+"Reassessing" = "重新判断中";
+"%@ is reassessing this item" = "%@ 正在重新判断此项";
+"Only this selected item is being checked. The rest of the reviewed plan will not change." = "仅检查当前选中的这一项，已审核方案中的其他内容不会改变。";
+"Reassessment stopped. The previous judgment remains in place." = "重新判断已停止，原判断保持不变。";
+"Reassessment failed. The previous judgment remains in place." = "重新判断未完成，原判断保持不变。";

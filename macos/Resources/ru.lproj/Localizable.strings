@@ -1050,3 +1050,8 @@
 "Agent investigation unresolved" = "Исследование агента не завершено";
 "Current decision: You · Original source: %@" = "Текущее решение: вы · исходный источник: %@";
 "Decision source: %@" = "Источник решения: %@";
+"Reassessing" = "Повторная оценка";
+"%@ is reassessing this item" = "%@ повторно оценивает этот объект";
+"Only this selected item is being checked. The rest of the reviewed plan will not change." = "Проверяется только выбранный объект. Остальная часть проверенного плана не изменится.";
+"Reassessment stopped. The previous judgment remains in place." = "Повторная оценка остановлена. Предыдущее решение сохранено.";
+"Reassessment failed. The previous judgment remains in place." = "Повторная оценка не завершена. Предыдущее решение сохранено.";

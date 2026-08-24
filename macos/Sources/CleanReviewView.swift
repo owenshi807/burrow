@@ -477,6 +477,7 @@ struct CleanReviewView: View {
         let recommendation = planStore.recommendation(for: candidate.id)
         let selected = planStore.isSelected(candidate)
         let active = planStore.selectedCandidateId == candidate.id
+        let reassessing = planStore.isReassessingCandidate(candidate.id)
         return HStack(spacing: 10) {
             Button { planStore.toggleCandidate(candidate.id) } label: {
                 ZStack {
@@ -497,7 +498,18 @@ struct CleanReviewView: View {
                             .lineLimit(1).truncationMode(.middle)
                     }
                     Spacer()
-                    judgmentBadge(recommendation, candidate: candidate)
+                    if reassessing {
+                        HStack(spacing: 5) {
+                            ProgressView().controlSize(.mini).tint(accent)
+                            Text(NSLocalizedString("Reassessing", comment: "candidate-level Agent progress"))
+                                .font(Brand.sans(9, .semibold)).foregroundStyle(accent)
+                        }
+                        .padding(.horizontal, 8).padding(.vertical, 4)
+                        .background(Capsule().fill(accent.opacity(0.12)))
+                        .accessibilityElement(children: .combine)
+                    } else {
+                        judgmentBadge(recommendation, candidate: candidate)
+                    }
                     Text(candidate.sizeText).font(Brand.mono(11)).foregroundStyle(Brand.textSecondary)
                         .frame(minWidth: 56, alignment: .trailing)
                 }
@@ -545,6 +557,7 @@ struct CleanReviewView: View {
                             Text(candidate.abbreviatedPath).font(Brand.mono(9)).foregroundStyle(Brand.textTertiary)
                                 .textSelection(.enabled)
                         }
+                        candidateReassessmentStatus(candidate)
                         VStack(alignment: .leading, spacing: 8) {
                             HStack {
                                 Label(recommendation.disposition.title, systemImage: recommendation.disposition.symbol)
@@ -637,7 +650,17 @@ struct CleanReviewView: View {
 
                         HStack(spacing: 12) {
                             Button(NSLocalizedString("Reveal in Finder", comment: "")) { AnalyzeIcons.reveal(candidate.path) }
-                            Button(NSLocalizedString("Ask Codex to reassess", comment: ""), action: onRetryAgent)
+                            if planStore.isReassessingCandidate(candidate.id) {
+                                Button(NSLocalizedString("Stop analysis", comment: "")) {
+                                    planStore.stopAgentAnalysis()
+                                }
+                            } else {
+                                Button(NSLocalizedString("Ask Codex to reassess", comment: "")) {
+                                    planStore.startCandidateReassessment(candidate.id)
+                                }
+                                .disabled(planStore.hasActiveAgentAnalysis)
+                                .opacity(planStore.hasActiveAgentAnalysis ? 0.45 : 1)
+                            }
                         }
                         .buttonStyle(.plain).font(Brand.sans(10, .semibold)).foregroundStyle(accent)
                     }
@@ -647,6 +670,62 @@ struct CleanReviewView: View {
                 overallInspector
             }
         }.background(Brand.nearBlack.opacity(0.35))
+    }
+
+    @ViewBuilder
+    private func candidateReassessmentStatus(_ candidate: CleanupPlanCandidate) -> some View {
+        if case .analyzing(let candidateId, let agent)? = planStore.candidateAgentState,
+           candidateId == candidate.id,
+           let progress = planStore.agentProgress {
+            TimelineView(.periodic(from: .now, by: 1)) { context in
+                HStack(spacing: 10) {
+                    ProgressView().controlSize(.small).tint(accent)
+                    VStack(alignment: .leading, spacing: 2) {
+                        Text(String(
+                            format: NSLocalizedString("%@ is reassessing this item", comment: "candidate-level Agent progress title"),
+                            agent))
+                            .font(Brand.sans(11, .semibold)).foregroundStyle(Brand.textPrimary)
+                        Text(activeAgentDetail(progress.phase))
+                            .font(Brand.sans(9)).foregroundStyle(Brand.textSecondary)
+                        Text(NSLocalizedString(
+                            "Only this selected item is being checked. The rest of the reviewed plan will not change.",
+                            comment: "candidate-level Agent scope explanation"))
+                            .font(Brand.sans(9)).foregroundStyle(Brand.textTertiary)
+                            .fixedSize(horizontal: false, vertical: true)
+                    }
+                    Spacer(minLength: 8)
+                    Text(elapsedText(progress.elapsed(at: context.date)))
+                        .font(Brand.mono(9, .medium)).foregroundStyle(accent)
+                }
+                .padding(11)
+                .background(RoundedRectangle(cornerRadius: 12, style: .continuous)
+                    .fill(accent.opacity(0.08)))
+                .overlay(RoundedRectangle(cornerRadius: 12, style: .continuous)
+                    .strokeBorder(accent.opacity(0.24)))
+            }
+        } else if case .stopped(let candidateId, _)? = planStore.candidateAgentState,
+                  candidateId == candidate.id {
+            Label(NSLocalizedString(
+                "Reassessment stopped. The previous judgment remains in place.",
+                comment: "candidate-level Agent stopped state"),
+                  systemImage: "stop.circle")
+                .font(Brand.sans(10)).foregroundStyle(Brand.textSecondary)
+                .padding(11)
+                .background(RoundedRectangle(cornerRadius: 12).fill(Brand.textTertiary.opacity(0.08)))
+        } else if case .failed(let candidateId, _, let reason)? = planStore.candidateAgentState,
+                  candidateId == candidate.id {
+            VStack(alignment: .leading, spacing: 3) {
+                Label(NSLocalizedString(
+                    "Reassessment failed. The previous judgment remains in place.",
+                    comment: "candidate-level Agent failed state"),
+                      systemImage: "exclamationmark.triangle.fill")
+                    .font(Brand.sans(10, .semibold)).foregroundStyle(Brand.amber)
+                Text(reason).font(Brand.sans(9)).foregroundStyle(Brand.textSecondary)
+                    .fixedSize(horizontal: false, vertical: true)
+            }
+            .padding(11)
+            .background(RoundedRectangle(cornerRadius: 12).fill(Brand.amber.opacity(0.08)))
+        }
     }
 
     private var overallInspector: some View {
