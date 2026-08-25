@@ -200,6 +200,18 @@ struct HelperStep: Equatable, Sendable {
     let arguments: [String]
 }
 
+/// Machine-readable lifecycle lines shared by the root helper and the app.
+/// They never enter the user-facing receipt; `OperationFlow` consumes the
+/// start line as a capability edge, while CleanView uses the current-path
+/// line to keep the running screen informative without streaming a wall of
+/// rows through the layout.
+enum HelperRuntimeTranscript {
+    static let operationStarted = "BURROW_OPERATION_STARTED"
+    static let cleaningPrefix = "BURROW_CLEANING\t"
+    static let cleanedPrefix = "BURROW_CLEANED\t"
+    static let skippedPrefix = "BURROW_SKIPPED_CHANGED\t"
+}
+
 // MARK: - Invoking user
 
 /// The non-privileged app's statement of who initiated the operation. This is

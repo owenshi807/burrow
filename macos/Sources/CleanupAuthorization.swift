@@ -51,8 +51,9 @@ enum CleanupScopeValidator {
 }
 
 enum CleanupRuntimeTranscript {
-    static let cleanedPrefix = "BURROW_CLEANED\t"
-    static let skippedPrefix = "BURROW_SKIPPED_CHANGED\t"
+    static let cleanedPrefix = HelperRuntimeTranscript.cleanedPrefix
+    static let skippedPrefix = HelperRuntimeTranscript.skippedPrefix
+    static let cleaningPrefix = HelperRuntimeTranscript.cleaningPrefix
 
     static func paths(in lines: [String], prefix: String) -> Set<String> {
         Set(lines.compactMap { line in
@@ -299,6 +300,7 @@ struct CleanupExecutionPlan: Sendable, Equatable {
                 + "&& \(scopeTimes) && [ -n \"$scope_times\" ] && ! (\(scopeChanged)) "
                 + "&& ! \(lsof) && ! \(activeApp); then "
                 + "attempted=$((attempted + 1)); p=\(path); "
+                + "/usr/bin/printf '%s\\t%s\\n' 'BURROW_CLEANING' \"$p\"; "
                 + "/usr/bin/find -x \"$p\" -depth -delete; "
                 + "if [ -e \"$p\" ] || [ -L \"$p\" ]; then failed=1; "
                 + "else /usr/bin/printf '%s\\t%s\\n' 'BURROW_CLEANED' \"$p\"; fi; "

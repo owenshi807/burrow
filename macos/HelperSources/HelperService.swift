@@ -360,12 +360,17 @@ enum HelperEngine {
 /// the root child it had spawned, so the streaming flow simply had no safe
 /// cancel. Here the child is ours to signal and reap.
 final class HelperOperationRunner: @unchecked Sendable {
-    private struct Running {
-        let process: Process
+    private final class Running {
+        var process: Process?
+        var cancelRequested = false
         /// Who started it. Cancellation is bound to the same account, so on a
         /// machine with several signed-in users one session cannot stop
         /// another's root operation just by knowing its ID.
         let ownerUID: UInt32
+
+        init(ownerUID: UInt32) {
+            self.ownerUID = ownerUID
+        }
     }
 
     private let lock = NSLock()
@@ -384,9 +389,29 @@ final class HelperOperationRunner: @unchecked Sendable {
              reviewedPaths: [String] = [],
              enginePath: String?,
              invokingUser: HelperResolvedInvokingUser,
+             onStarted: @escaping () -> Void = {},
              emit: @escaping (String) -> Void) -> Int32 {
+        let state = Running(ownerUID: invokingUser.uid)
+        lock.lock()
+        guard running[operationID] == nil else { lock.unlock(); return 127 }
+        running[operationID] = state
+        lock.unlock()
+        defer { lock.lock(); running.removeValue(forKey: operationID); lock.unlock() }
+
+        // The client only enables Stop after this edge. From here onward the
+        // operation is registered in `running`, so a cancellation can never
+        // race ahead of the daemon and disappear as "nothing to stop".
+        onStarted()
+
         var last: Int32 = 0
-        for step in operation.steps(interface: interface, reviewedPaths: reviewedPaths) {
+        for (index, step) in operation.steps(interface: interface,
+                                             reviewedPaths: reviewedPaths).enumerated() {
+            lock.lock(); let wasCancelled = state.cancelRequested; lock.unlock()
+            if wasCancelled { return 143 }
+
+            if operation.needsReviewedPaths, reviewedPaths.indices.contains(index) {
+                emit(HelperRuntimeTranscript.cleaningPrefix + reviewedPaths[index])
+            }
             let path: String
             switch step.executable {
             case .bundledEngine:
@@ -407,9 +432,15 @@ final class HelperOperationRunner: @unchecked Sendable {
                 path = systemPath
             }
             let status = runOne(path: path, arguments: step.arguments,
-                                operationID: operationID, ownerUID: invokingUser.uid,
+                                operationID: operationID, state: state,
                                 environment: invokingUser.childEnvironment,
                                 emit: emit)
+            if operation.needsReviewedPaths, reviewedPaths.indices.contains(index) {
+                var info = stat()
+                if lstat(reviewedPaths[index], &info) != 0 {
+                    emit(HelperRuntimeTranscript.cleanedPrefix + reviewedPaths[index])
+                }
+            }
             // For a reviewed clean, `find`'s status is NOT the verdict — the
             // postcondition below is. `-delete` returns true even when it
             // removed nothing, and it returns FALSE for an entry that a
@@ -427,7 +458,7 @@ final class HelperOperationRunner: @unchecked Sendable {
     private func runOne(path: String,
                         arguments: [String],
                         operationID: String,
-                        ownerUID: UInt32,
+                        state: Running,
                         environment: [String: String],
                         emit: @escaping (String) -> Void) -> Int32 {
         let process = Process()
@@ -449,6 +480,8 @@ final class HelperOperationRunner: @unchecked Sendable {
         process.standardInput = FileHandle.nullDevice
 
         do {
+            lock.lock(); let cancelledBeforeSpawn = state.cancelRequested; lock.unlock()
+            guard !cancelledBeforeSpawn else { return 143 }
             try process.run()
         } catch {
             helperTrace("engine spawn failed for operation \(operationID)")
@@ -456,9 +489,15 @@ final class HelperOperationRunner: @unchecked Sendable {
         }
 
         lock.lock()
-        running[operationID] = Running(process: process, ownerUID: ownerUID)
+        state.process = process
+        let cancelledAfterSpawn = state.cancelRequested
         lock.unlock()
-        defer { lock.lock(); running.removeValue(forKey: operationID); lock.unlock() }
+        if cancelledAfterSpawn { process.terminate() }
+        defer {
+            lock.lock()
+            if state.process === process { state.process = nil }
+            lock.unlock()
+        }
 
         try? outPipe.fileHandleForWriting.close()
         try? errPipe.fileHandleForWriting.close()
@@ -502,9 +541,32 @@ final class HelperOperationRunner: @unchecked Sendable {
     /// exactly like an ID that isn't running: no signal, no acknowledgement
     /// that it exists.
     func cancel(operationID: String, requestedBy: UInt32) -> Bool {
-        lock.lock(); let entry = running[operationID]; lock.unlock()
-        guard let entry, entry.ownerUID == requestedBy, entry.process.isRunning else { return false }
-        entry.process.terminate()
+        lock.lock()
+        guard let entry = running[operationID], entry.ownerUID == requestedBy else {
+            lock.unlock()
+            return false
+        }
+        entry.cancelRequested = true
+        let process = entry.process
+        lock.unlock()
+        if let process, process.isRunning {
+            process.terminate()
+            // Match the app-side ChildGuard contract: Stop must not become an
+            // indefinite wait when a filesystem process ignores SIGTERM.
+            // Re-check identity under the lock before SIGKILL so a recycled
+            // pid can never be targeted after this operation has moved on.
+            DispatchQueue.global(qos: .utility).asyncAfter(deadline: .now() + 2) { [weak self, weak process] in
+                guard let self, let process else { return }
+                self.lock.lock()
+                let stillOurs = self.running[operationID] === entry
+                    && entry.process === process
+                    && entry.cancelRequested
+                    && process.isRunning
+                let pid = process.processIdentifier
+                self.lock.unlock()
+                if stillOurs { _ = Darwin.kill(pid, SIGKILL) }
+            }
+        }
         return true
     }
 
@@ -752,7 +814,11 @@ final class HelperService: NSObject, BurrowHelperProtocol {
                               interface: request.networkInterface,
                               reviewedPaths: reviewedPaths,
                               enginePath: enginePath,
-                              invokingUser: invokingUser) { line in
+                              invokingUser: invokingUser,
+                              onStarted: {
+            client?.helperDidEmit(line: HelperRuntimeTranscript.operationStarted,
+                                  operationID: operationID)
+        }) { line in
             client?.helperDidEmit(line: line, operationID: operationID)
         }
         // Keep the validated clone alive until Process has exited and every

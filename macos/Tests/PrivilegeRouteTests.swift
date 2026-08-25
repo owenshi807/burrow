@@ -169,4 +169,14 @@ final class PrivilegeRouteTests: XCTestCase {
                                              skew: .matched),
                        .osascript)
     }
+
+    func testLegacyRuntimeOnlyForcesFallbackForEngineCommands() {
+        XCTAssertTrue(HelperAwareProcessPort.requiresLegacyFallback(
+            runtimeKind: .legacyConductor, hasReviewedCleanup: false))
+        XCTAssertFalse(HelperAwareProcessPort.requiresLegacyFallback(
+            runtimeKind: .legacyConductor, hasReviewedCleanup: true),
+            "reviewed cleanup uses the helper's closed find plan, not the legacy conductor")
+        XCTAssertFalse(HelperAwareProcessPort.requiresLegacyFallback(
+            runtimeKind: .selfContainedEngine, hasReviewedCleanup: false))
+    }
 }

@@ -214,6 +214,51 @@ final class OperationFlowTests: XCTestCase {
                        "SIGTERMing the osascript messenger would orphan the root child")
     }
 
+    func testElevatedRunBecomesCancellableOnlyAfterHelperOwnsIt() async {
+        let port = FakeProcessPort(script: [
+            .line(HelperRuntimeTranscript.cleaningPrefix + "/tmp/cache-a"),
+            .cancellationAvailable,
+        ])
+        port.holdOpen = true
+        let flow = makeFlow(port)
+
+        flow.start(Self.cleanOp(elevated: true))
+        for _ in 0..<1000 {
+            if flow.canCancel { break }
+            await Task.yield()
+        }
+
+        XCTAssertTrue(flow.canCancel,
+                      "the daemon's ownership edge enables a safe elevated stop")
+        XCTAssertEqual(flow.currentLine,
+                       HelperRuntimeTranscript.cleaningPrefix + "/tmp/cache-a")
+        XCTAssertEqual(flow.receivedLineCount, 1,
+                       "capability events do not inflate filesystem progress")
+
+        flow.cancel()
+        guard case .finished(.cancelled) = flow.state else {
+            return XCTFail("expected cancelled")
+        }
+        for _ in 0..<1000 { if port.terminated { break }; await Task.yield() }
+        XCTAssertTrue(port.terminated)
+        XCTAssertFalse(flow.canCancel)
+    }
+
+    func testElevatedFallbackExplainsThatItCannotBeStoppedSafely() async {
+        let port = FakeProcessPort(script: [.cancellationUnavailable, .line("working")])
+        port.holdOpen = true
+        let flow = makeFlow(port)
+
+        flow.start(Self.cleanOp(elevated: true))
+        for _ in 0..<1000 {
+            if flow.cancellationUnavailable { break }
+            await Task.yield()
+        }
+
+        XCTAssertTrue(flow.cancellationUnavailable)
+        XCTAssertFalse(flow.canCancel)
+    }
+
     func testStdinTimeoutAndPathExecutableReachSpec() async throws {
         let port = FakeProcessPort(script: [.exited(0)])
         let flow = OperationFlow<String>(process: port, hasFullDiskAccess: { true },
@@ -510,6 +555,7 @@ final class SystemProcessPortTests: XCTestCase {
                 for await e in stream {
                     switch e {
                     case .line(let l): await collected.append(l)
+                    case .cancellationAvailable, .cancellationUnavailable: break
                     case .exited(let c): await collected.exited(c)
                     case .authCancelled: await collected.authCancelled()
                     }

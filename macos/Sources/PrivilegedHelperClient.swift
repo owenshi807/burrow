@@ -194,9 +194,10 @@ final class PrivilegedHelperClient: @unchecked Sendable {
         return result
     }
 
-    /// Whether the installed helper matches this app. Cached per process
-    /// because it only changes across an update or a re-registration, both of
-    /// which clear it.
+    /// Whether the installed helper matches this app. A match is stable for
+    /// this app process and may be cached. A mismatch is deliberately retried:
+    /// after an app update launchd can still be draining the previous daemon,
+    /// then start the newly bundled helper without this app relaunching.
     func versionSkew() -> HelperVersionSkew.Skew {
         lock.lock()
         if let cachedSkew { lock.unlock(); return cachedSkew }
@@ -208,7 +209,9 @@ final class PrivilegedHelperClient: @unchecked Sendable {
             app is \(Self.appBuild, privacy: .public)
             """)
         let skew = HelperVersionSkew.evaluate(appBuild: Self.appBuild, helperBuild: reported)
-        lock.lock(); cachedSkew = skew; lock.unlock()
+        if skew == .matched {
+            lock.lock(); cachedSkew = skew; lock.unlock()
+        }
         return skew
     }
 
@@ -243,6 +246,7 @@ final class PrivilegedHelperClient: @unchecked Sendable {
              interface: String? = nil,
              reviewedPaths: [String] = [],
              cleanupPlan: CleanupExecutionPlan? = nil,
+             operationID: String = UUID().uuidString,
              invokingUser suppliedIdentity: InvokingUserIdentity? = nil,
              onLine: @escaping (String) -> Void) -> ElevatedOutcome {
         // Resolve while still running as the caller and before showing an auth
@@ -309,7 +313,29 @@ final class PrivilegedHelperClient: @unchecked Sendable {
             send(payload: granted.externalForm, operation: operation,
                  interface: interface, reviewedPaths: effectiveReviewedPaths,
                  reviewedValidatedAt: reviewedValidatedAt,
-                 invokingUser: invokingUser, onLine: onLine)
+                 operationID: operationID, invokingUser: invokingUser, onLine: onLine)
+        }
+    }
+
+    /// Stop a helper-owned operation. No authorization prompt is needed: the
+    /// daemon binds the request to the same signed client and invoking uid that
+    /// started the operation. Completion is asynchronous so stream teardown
+    /// never blocks Swift concurrency's cancellation path.
+    func cancel(operationID: String, completion: @escaping (Bool) -> Void = { _ in }) {
+        let connection = makeConnection()
+        connection.resume()
+        let proxy = connection.remoteObjectProxyWithErrorHandler { _ in
+            connection.invalidate()
+            completion(false)
+        }
+        guard let helper = proxy as? BurrowHelperProtocol else {
+            connection.invalidate()
+            completion(false)
+            return
+        }
+        helper.cancelOperation(operationID: operationID) { stopped in
+            connection.invalidate()
+            completion(stopped)
         }
     }
 
@@ -344,10 +370,11 @@ final class PrivilegedHelperClient: @unchecked Sendable {
                       interface: String?,
                       reviewedPaths: [String],
                       reviewedValidatedAt: Date?,
+                      operationID: String,
                       invokingUser: InvokingUserIdentity,
                       onLine: @escaping (String) -> Void) -> ElevatedOutcome {
         let request = HelperRequest(operation: operation,
-                                    operationID: UUID().uuidString,
+                                    operationID: operationID,
                                     clientBuild: Self.appBuild,
                                     invokingUser: HelperInvokingUserClaim(
                                         uid: UInt32(invokingUser.uid),
@@ -413,7 +440,8 @@ struct HelperAwareProcessPort: ProcessPort {
         // environment and cannot be client-directed to an engine directory.
         // Legacy 0.14 conductors require BURROW_ENGINE_DIR, so keep them on the
         // signed osascript path which derives that fixed bundle path locally.
-        guard BurrowConductor.runtimeKind != .legacyConductor else {
+        guard !Self.requiresLegacyFallback(runtimeKind: BurrowConductor.runtimeKind,
+                                           hasReviewedCleanup: spec.cleanupPlan != nil) else {
             return fallback.events(spec)
         }
 
@@ -425,7 +453,12 @@ struct HelperAwareProcessPort: ProcessPort {
                 switch client.route(for: spec.arguments,
                                     hasReviewedCleanup: spec.cleanupPlan != nil) {
                 case .helper(let operation):
+                    let operationID = UUID().uuidString
                     var sawOutput = false
+                    continuation.onTermination = { @Sendable termination in
+                        guard case .cancelled = termination else { return }
+                        client.cancel(operationID: operationID)
+                    }
                     // Re-validate the plan on THIS side of the prompt too. The
                     // daemon checks the paths independently, but a plan that
                     // already went stale should never raise a prompt at all.
@@ -447,7 +480,12 @@ struct HelperAwareProcessPort: ProcessPort {
                     let outcome = client.run(operation: operation,
                                              reviewedPaths: reviewedPaths,
                                              cleanupPlan: spec.cleanupPlan,
+                                             operationID: operationID,
                                              invokingUser: spec.invokingUser) { line in
+                        if line == HelperRuntimeTranscript.operationStarted {
+                            continuation.yield(.cancellationAvailable)
+                            return
+                        }
                         sawOutput = true
                         continuation.yield(.line(line))
                     }
@@ -478,6 +516,7 @@ struct HelperAwareProcessPort: ProcessPort {
                     // Forward the legacy stream verbatim, including its
                     // cancellation behaviour.
                     let task = Task {
+                        continuation.yield(.cancellationUnavailable)
                         var effectiveSpec = spec
                         if let plan = spec.cleanupPlan {
                             // This branch is always inside the routing worker
@@ -503,6 +542,15 @@ struct HelperAwareProcessPort: ProcessPort {
                 }
             }
         }
+    }
+
+    /// The legacy conductor itself needs BURROW_ENGINE_DIR, which the helper
+    /// intentionally refuses to inherit. A reviewed cleanup is different: the
+    /// helper executes its closed `/usr/bin/find` plan and never launches that
+    /// conductor, so it must stay eligible for safe cancellation.
+    static func requiresLegacyFallback(runtimeKind: BurrowConductor.RuntimeKind,
+                                       hasReviewedCleanup: Bool) -> Bool {
+        runtimeKind == .legacyConductor && !hasReviewedCleanup
     }
 }
 

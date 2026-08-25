@@ -231,6 +231,7 @@ final class MoEngineTests: XCTestCase {
                                                      elevated: false, timeout: nil)) {
             switch event {
             case .line(let l): lines.append(l)
+            case .cancellationAvailable, .cancellationUnavailable: break
             case .exited(let c): exit = c
             case .authCancelled: XCTFail("the fake never emits auth-cancel")
             }
@@ -267,6 +268,7 @@ final class MoEngineTests: XCTestCase {
                                                      stdin: nil, elevated: false, timeout: nil)) {
             switch event {
             case .line(let l): lines.append(l)
+            case .cancellationAvailable, .cancellationUnavailable: break
             case .exited(let c): exit = c
             case .authCancelled: XCTFail("un-elevated runs never classify as auth-cancel")
             }

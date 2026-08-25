@@ -34,6 +34,20 @@ typealias CleanDryReport = (
     currentSection: String?
 )
 
+private struct CleanRunContext {
+    let totalItems: Int?
+    let totalBytes: Int64?
+
+    static let engineManaged = CleanRunContext(totalItems: nil, totalBytes: nil)
+
+    static func reviewed(_ items: [CleanList.Item]) -> CleanRunContext {
+        CleanRunContext(
+            totalItems: items.count,
+            totalBytes: items.reduce(Int64(0)) { $0 + $1.sizeBytes }
+        )
+    }
+}
+
 enum CleanScanFinishedPresentation: Equatable {
     case result
     case failure(String)
@@ -64,6 +78,12 @@ struct CleanView: View {
     @State private var fdaGranted = Privacy.hasFullDiskAccess()
     /// All-time bytes cleaned (PRD §Clean), loaded off-main for the done screen.
     @State private var lifetimeCleaned: Int64 = 0
+    /// Immutable metadata for the active run. The live screen reads this
+    /// instead of using a growing report as layout input, so rows completing
+    /// cannot move the controls or resize the page.
+    @State private var realRunContext: CleanRunContext?
+    @State private var realRunStartedAt: Date?
+    @State private var realRunCurrentPath: String?
     @AppStorage("cleanupAgentConsent.v1") private var cleanupAgentConsent = false
     @Environment(\.accessibilityReduceMotion) private var reduceMotion
 
@@ -123,6 +143,11 @@ struct CleanView: View {
         .onChange(of: dryRunRunning) { _, running in
             if running { scanStartedAt = Date() }
         }
+        .onChange(of: realFlow.currentLine) { _, line in
+            guard line.hasPrefix(CleanupRuntimeTranscript.cleaningPrefix) else { return }
+            let path = String(line.dropFirst(CleanupRuntimeTranscript.cleaningPrefix.count))
+            if !path.isEmpty { realRunCurrentPath = path }
+        }
         .overlay(alignment: .bottom) {
             if let result = trashResult {
                 DoneBanner(accent: Tool.clean.accent, title: "Moved to Trash", detail: result)
@@ -176,6 +201,9 @@ struct CleanView: View {
         trashResult = nil
         screen = .hero
         realFlow.reset()
+        realRunContext = .engineManaged
+        realRunStartedAt = Date()
+        realRunCurrentPath = nil
         // No cleanup plan: the engine chooses its own targets, so this routes
         // to the plain `clean` operation rather than the reviewed one.
         //
@@ -450,6 +478,9 @@ struct CleanView: View {
         guard confirmation.runModalQuiet() == .alertFirstButtonReturn else { return }
 
         screen = .hero
+        realRunContext = .reviewed(cleaned.flatMap(\.1))
+        realRunStartedAt = Date()
+        realRunCurrentPath = nil
         realFlow.start(ToolOperation(
             label: NSLocalizedString("Cleaning reviewed caches", comment: ""),
             executable: .path("/usr/bin/find"), arguments: [], elevated: true,
@@ -591,15 +622,153 @@ struct CleanView: View {
             }
             .padding(.horizontal, 18).padding(.top, 4).padding(.bottom, 12)
             Rectangle().fill(Brand.hairline).frame(height: 1)
-            if case .finished(.done(exit: 0)) = realFlow.state {
-                DoneBanner(accent: Tool.clean.accent, title: "Cleaned", detail: cleanedDetail)
-                    .task { await loadLifetime() }
-            }
-            TaskReportView(groups: realFlow.report?.groups ?? [], accent: Tool.clean.accent)
-            if case .finished = realFlow.state {
-                ViewLogDisclosure(log: realFlow.rawLog)
+            if case .running = realFlow.state {
+                stableCleaningProgress
+            } else {
+                if case .finished(.done(exit: 0)) = realFlow.state {
+                    DoneBanner(accent: Tool.clean.accent, title: "Cleaned", detail: cleanedDetail)
+                        .task { await loadLifetime() }
+                }
+                TaskReportView(groups: realFlow.report?.groups ?? [], accent: Tool.clean.accent)
+                if case .finished = realFlow.state {
+                    ViewLogDisclosure(log: realFlow.rawLog)
+                }
             }
         }
+    }
+
+    /// One fixed geometry for the whole destructive phase. Only text and the
+    /// progress fill change; the receipt is withheld until the run reaches a
+    /// terminal state, so a newly completed path cannot make the page jump.
+    private var stableCleaningProgress: some View {
+        TimelineView(.periodic(from: .now, by: 1)) { timeline in
+            VStack(spacing: 22) {
+                Spacer(minLength: 32)
+                GlassCard(padding: 24, corner: 22) {
+                    VStack(alignment: .leading, spacing: 20) {
+                        HStack(spacing: 13) {
+                            ZStack {
+                                Circle().fill(Tool.clean.accent.opacity(0.16))
+                                    .frame(width: 44, height: 44)
+                                ProgressView().controlSize(.small).tint(Tool.clean.accent)
+                            }
+                            VStack(alignment: .leading, spacing: 3) {
+                                Text("Cleaning your Mac")
+                                    .font(Brand.sans(18, .semibold))
+                                    .foregroundStyle(Brand.textPrimary)
+                                Text(cleaningElapsedText(at: timeline.date))
+                                    .font(Brand.mono(10)).foregroundStyle(Brand.textTertiary)
+                            }
+                            Spacer()
+                            Text(cleaningProgressLabel)
+                                .font(Brand.mono(11, .semibold))
+                                .foregroundStyle(Tool.clean.accent)
+                        }
+
+                        VStack(alignment: .leading, spacing: 7) {
+                            Text("Currently cleaning")
+                                .font(Brand.mono(10, .bold))
+                                .foregroundStyle(Brand.textTertiary)
+                            Text(currentCleaningDisplay)
+                                .font(Brand.mono(12))
+                                .foregroundStyle(Brand.textPrimary)
+                                .lineLimit(2)
+                                .truncationMode(.middle)
+                                .frame(maxWidth: .infinity, minHeight: 36,
+                                       alignment: .topLeading)
+                        }
+                        .padding(14)
+                        .background(RoundedRectangle(cornerRadius: 13, style: .continuous)
+                            .fill(Color.black.opacity(0.20)))
+                        .overlay(RoundedRectangle(cornerRadius: 13, style: .continuous)
+                            .strokeBorder(Brand.hairline, lineWidth: 1))
+
+                        if let total = realRunContext?.totalItems, total > 0 {
+                            ProgressView(value: Double(min(cleaningCompletedCount, total)),
+                                         total: Double(total))
+                                .tint(Tool.clean.accent)
+                        } else {
+                            ProgressView().tint(Tool.clean.accent)
+                        }
+
+                        HStack(alignment: .center, spacing: 16) {
+                            VStack(alignment: .leading, spacing: 3) {
+                                Text(cleaningPlanSummary)
+                                    .font(Brand.mono(10)).foregroundStyle(Brand.textSecondary)
+                                Text(realFlow.canCancel
+                                     ? NSLocalizedString("Stopping does not restore items already cleaned.", comment: "")
+                                     : realFlow.cancellationUnavailable
+                                        ? NSLocalizedString("This cleanup route cannot be stopped safely.", comment: "")
+                                        : NSLocalizedString("Preparing a safe stopping point…", comment: ""))
+                                    .font(Brand.sans(10)).foregroundStyle(Brand.textTertiary)
+                            }
+                            Spacer()
+                            Button { realFlow.cancel() } label: {
+                                Label("Stop cleanup", systemImage: "stop.fill")
+                                    .font(Brand.sans(12, .semibold))
+                                    .foregroundStyle(realFlow.canCancel ? Color.white : Brand.textTertiary)
+                                    .padding(.horizontal, 16).padding(.vertical, 9)
+                                    .background(Capsule().fill(realFlow.canCancel
+                                        ? Brand.red.opacity(0.82) : Color.white.opacity(0.06)))
+                            }
+                            .buttonStyle(.plain)
+                            .disabled(!realFlow.canCancel)
+                        }
+                    }
+                }
+                .frame(maxWidth: 650)
+                Spacer(minLength: 56)
+            }
+            .padding(.horizontal, 28)
+            .frame(maxWidth: .infinity, maxHeight: .infinity)
+        }
+    }
+
+    private var currentCleaningPath: String? {
+        realRunCurrentPath
+    }
+
+    private var currentCleaningDisplay: String {
+        if let path = currentCleaningPath { return path }
+        let line = realFlow.currentDetail.trimmingCharacters(in: .whitespacesAndNewlines)
+        guard !line.isEmpty,
+              !line.hasPrefix(CleanupRuntimeTranscript.cleanedPrefix),
+              !line.hasPrefix(CleanupRuntimeTranscript.skippedPrefix) else {
+            return NSLocalizedString("Preparing the next verified item…", comment: "")
+        }
+        return TaskReportText.line(line)
+    }
+
+    private var cleaningCompletedCount: Int {
+        realFlow.report?.groups.reduce(0) { $0 + $1.items.count } ?? 0
+    }
+
+    private var cleaningProgressLabel: String {
+        guard let total = realRunContext?.totalItems, total > 0 else {
+            return String(format: NSLocalizedString("%d processed", comment: ""),
+                          cleaningCompletedCount)
+        }
+        return String(format: NSLocalizedString("%d of %d", comment: ""),
+                      min(cleaningCompletedCount, total), total)
+    }
+
+    private var cleaningPlanSummary: String {
+        var parts: [String] = []
+        if let total = realRunContext?.totalItems {
+            parts.append(String(format: NSLocalizedString("%d verified items", comment: ""), total))
+        }
+        if let bytes = realRunContext?.totalBytes {
+            parts.append(String(format: NSLocalizedString("%@ selected", comment: ""), Fmt.bytes(bytes)))
+        }
+        return parts.isEmpty
+            ? NSLocalizedString("Burrow is processing the verified cleanup plan.", comment: "")
+            : parts.joined(separator: " · ")
+    }
+
+    private func cleaningElapsedText(at date: Date) -> String {
+        let elapsed = max(0, Int(date.timeIntervalSince(realRunStartedAt ?? date)))
+        return String(format: NSLocalizedString("Elapsed %@", comment: ""),
+                      String(format: "%d:%02d", elapsed / 60, elapsed % 60))
     }
     // (Session restore lives with the run watcher in runRealClean — a
     // view-attached onChange would miss runs that finish after the user
@@ -607,7 +776,7 @@ struct CleanView: View {
 
     private var realStatusText: String {
         switch realFlow.state {
-        case .running: return NSLocalizedString("Cleaning… don't quit.", comment: "")
+        case .running: return NSLocalizedString("Cleaning verified items", comment: "")
         case .finished(.done(exit: 0)): return NSLocalizedString("Done — caches cleared.", comment: "")
         case .finished(.done(let code)):
             return String(format: NSLocalizedString("Failed: cleanup exited with status %d.", comment: ""), code)

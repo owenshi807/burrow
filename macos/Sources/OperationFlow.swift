@@ -35,6 +35,13 @@ struct ProcessSpec: Sendable, Equatable {
 
 enum ProcessEvent: Sendable {
     case line(String)        // ANSI-stripped, newline-split
+    /// The process owner has registered this run and can now stop it without
+    /// orphaning privileged work. Elevated helper runs emit this only after
+    /// the daemon has accepted the operation ID.
+    case cancellationAvailable
+    /// The selected elevation route cannot be interrupted without potentially
+    /// orphaning privileged work.
+    case cancellationUnavailable
     case exited(Int32)
     /// The elevated run's auth prompt was dismissed: osascript exited
     /// nonzero having produced nothing. Classified by the RUNNER (issue
@@ -169,12 +176,20 @@ final class OperationFlow<Report: Sendable>: ObservableObject {
     /// terminal event (not per line) to stay O(n), and empty for a run
     /// that never reached an exit (cancelled).
     @Published private(set) var rawLog: String = ""
+    /// The latest meaningful stream line. Running screens use this as a
+    /// single, stable activity slot instead of re-laying out the full report
+    /// every time another path finishes.
+    @Published private(set) var currentLine: String = ""
+    @Published private(set) var currentDetail: String = ""
+    @Published private(set) var receivedLineCount = 0
+    @Published private(set) var cancellationUnavailable = false
 
-    /// Stop only works for un-elevated runs: the root `mo` is a child of
-    /// the privileged shell, and SIGTERMing our osascript messenger would
-    /// just orphan it mid-delete while the UI claims "Stopped."
+    /// Unprivileged children can always be stopped. Elevated work becomes
+    /// cancellable only after the root helper reports that it owns the child;
+    /// the legacy osascript route never sends that capability edge because
+    /// killing its messenger would orphan the root deletion.
     var canCancel: Bool {
-        if case .running = state { return !currentElevated }
+        if case .running = state { return cancellationAvailable }
         return false
     }
 
@@ -191,7 +206,7 @@ final class OperationFlow<Report: Sendable>: ObservableObject {
     private let center: OperationCenter
 
     private var task: Task<Void, Never>?
-    private var currentElevated = false
+    @Published private(set) var cancellationAvailable = false
     private var currentLabel: String?
     private var telemetryFeature: String?
     private var telemetryStartedAt: Date?
@@ -313,7 +328,11 @@ final class OperationFlow<Report: Sendable>: ObservableObject {
         report = nil
         lastReportAt = .distantPast
         rawLog = ""
-        currentElevated = op.elevated
+        currentLine = ""
+        currentDetail = ""
+        receivedLineCount = 0
+        cancellationAvailable = !op.elevated
+        cancellationUnavailable = false
         currentLabel = op.label
         telemetryFeature = FeatureOperationTelemetry.feature(for: op)
         telemetryStartedAt = Date()
@@ -342,6 +361,12 @@ final class OperationFlow<Report: Sendable>: ObservableObject {
                     // focus back to Burrow, instead of making the user ⌘-tab.
                     self.reactivateIfElevated(op)
                     lines.append(l)
+                    self.currentLine = l
+                    self.receivedLineCount += 1
+                    let detail = (op.hudLine ?? { $0 })(l)
+                    if !detail.trimmingCharacters(in: .whitespacesAndNewlines).isEmpty {
+                        self.currentDetail = detail
+                    }
                     // Throttled live re-parse (see `lastReportAt`): recompute
                     // at most ~4×/s instead of on every streamed line. The
                     // terminal events below always do a final, authoritative
@@ -352,8 +377,14 @@ final class OperationFlow<Report: Sendable>: ObservableObject {
                         self.report = op.reduce(lines)
                     }
                     if op.label != nil, !l.trimmingCharacters(in: .whitespaces).isEmpty {
-                        self.center.detail(id, (op.hudLine ?? { $0 })(l))
+                        self.center.detail(id, detail)
                     }
+                case .cancellationAvailable:
+                    self.cancellationAvailable = true
+                    self.cancellationUnavailable = false
+                case .cancellationUnavailable:
+                    self.cancellationAvailable = false
+                    self.cancellationUnavailable = true
                 case .exited(let code):
                     guard !self.cancelRequested else { return }
                     self.reactivateIfElevated(op)   // backstop: no-output runs
@@ -408,6 +439,7 @@ final class OperationFlow<Report: Sendable>: ObservableObject {
     func cancel() {
         guard canCancel else { return }
         cancelRequested = true
+        cancellationAvailable = false
         task?.cancel()            // stream onTermination terminates the child
         state = .finished(.cancelled)
         if currentLabel != nil { center.end(opID, success: false) }
@@ -419,6 +451,11 @@ final class OperationFlow<Report: Sendable>: ObservableObject {
         state = .idle
         report = nil
         rawLog = ""
+        currentLine = ""
+        currentDetail = ""
+        receivedLineCount = 0
+        cancellationAvailable = false
+        cancellationUnavailable = false
     }
 
     /// Turn an exit status into something a person can act on. The wrapper's

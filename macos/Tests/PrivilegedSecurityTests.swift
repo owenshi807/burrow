@@ -367,6 +367,7 @@ final class CleanupAuthorizationTests: XCTestCase {
 
     func testRuntimeTranscriptReturnsExactCleanedAndSkippedPaths() {
         let lines = [
+            "BURROW_CLEANING\t/tmp/cache with spaces",
             "BURROW_CLEANED\t/tmp/cache with spaces",
             "unrelated output",
             "BURROW_SKIPPED_CHANGED\t/tmp/live-cache",
@@ -377,6 +378,8 @@ final class CleanupAuthorizationTests: XCTestCase {
         XCTAssertEqual(CleanupRuntimeTranscript.paths(
             in: lines, prefix: CleanupRuntimeTranscript.skippedPrefix),
             Set(["/tmp/live-cache"]))
+        XCTAssertEqual(CleanupRuntimeTranscript.cleaningPrefix,
+                       HelperRuntimeTranscript.cleaningPrefix)
     }
 
     func testTrashMoveRestoresAnUnreviewedObjectCapturedByAPathRace() throws {
