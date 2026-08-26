@@ -1445,6 +1445,45 @@ final class CleanupAgentPlanTests: XCTestCase {
         }
     }
 
+    func testCandidateReassessmentAnalyzesProtectedSelectedCandidate() async throws {
+        let fixture = try makeFixture()
+        let protectedPath = fixture.list.categories[0].items[0].path
+        let analyzer = FakeCleanupAnalyzer(delay: 40_000_000) { input in
+            XCTAssertEqual(input.candidates.count, 1)
+            XCTAssertEqual(input.focusedCandidateId, input.candidates[0].candidateId)
+            XCTAssertNotNil(input.candidates[0].runningApp)
+            XCTAssertTrue(input.candidates[0].deepReviewRequired)
+            return CleanupAgentAnalysis(summary: "focused protected row", recommendations: [
+                .init(candidateId: input.candidates[0].candidateId, disposition: .keep,
+                      reason: "This selected directory is a mixed active cache container.",
+                      consequence: "Keep the parent and inspect narrower children.",
+                      confidence: 0.95,
+                      evidence: [.init(basis: .observation, label: "Directory scope",
+                                       detail: "The selected parent contains multiple consumers.")],
+                      investigation: .verifiedKeepFixture),
+            ])
+        }
+        let store = CleanupPlanStore(analyzer: analyzer)
+        store.load(
+            list: fixture.list, snapshot: fixture.snapshot,
+            locked: [protectedPath: .notCleanable(reason: "Broad parent is protected")],
+            hasAgentConsent: true)
+        let target = try XCTUnwrap(store.candidates.first(where: { $0.path == protectedPath }))
+        let untouched = try XCTUnwrap(store.candidates.first(where: { $0.id != target.id }))
+
+        store.startCandidateReassessment(target.id)
+        try await waitUntilCandidateFinished(store)
+
+        let judgment = store.recommendation(for: target.id)
+        XCTAssertEqual(judgment.origin, .agent)
+        XCTAssertEqual(judgment.disposition, .keep)
+        XCTAssertTrue(judgment.evidence.contains(where: {
+            $0.detail.contains("mixed active cache container")
+        }))
+        XCTAssertFalse(store.isSelected(target))
+        XCTAssertEqual(store.recommendation(for: untouched.id).origin, .scanner)
+    }
+
     func testStoppingCandidateReassessmentPreservesThePreviousJudgment() async throws {
         let fixture = try makeFixture()
         let analyzer = FakeCleanupAnalyzer(delay: 1_000_000_000) { input in

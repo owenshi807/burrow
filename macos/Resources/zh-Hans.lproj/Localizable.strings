@@ -1006,6 +1006,9 @@
 "Agent discovered" = "Agent 发现";
 "Burrow kept this parent folder because the scan contains child items with their own judgments. Clean the verified child items instead." = "扫描结果中包含具有独立判断的子项，因此 Burrow 保留了这个父文件夹。请改为清理已验证的子项。";
 "Burrow safety check" = "Burrow 安全校验";
+"Codex item judgment" = "Codex 单项判断";
+"Codex completed the item-level analysis. Burrow still keeps this item protected: %@" = "Codex 已完成单项分析。Burrow 仍将此项保持为受保护状态：%@";
+"The selected item was analyzed on its own, but the safety lock prevents it from being added to the executable cleanup plan. The original Codex judgment remains in the evidence below." = "已单独分析你选中的项目，但安全锁阻止它加入可执行的清理方案。Codex 的原始判断保留在下方证据中。";
 "Clean verified plan · %@" = "清理已验证方案 · %@";
 "Codex is analyzing" = "Codex 正在分析";
 "Codex review incomplete" = "Codex 分析未完成";

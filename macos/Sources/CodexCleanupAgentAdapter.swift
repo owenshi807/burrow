@@ -426,7 +426,9 @@ struct CodexCleanupAgentAdapter: CleanupAgentAnalyzing, CleanupAgentProgressAnal
         // turn to rediscover size, sensitivity, locks, and parent/descendant
         // boundaries consumed most of the end-to-end budget on real 200+ item
         // scans. Codex receives the time saved here for semantic investigation.
-        let routing = resolveRouting(for: input.candidates, routerDeepReview: [])
+        let routing = resolveRouting(
+            for: input.candidates, routerDeepReview: [],
+            focusedCandidateId: input.focusedCandidateId)
         let deepIDs = Set(routing.deepReview.map(\.candidateId))
         let deepCandidates = input.candidates.filter { deepIDs.contains($0.candidateId) }
         let priorityBatch = priorityReviewBatch(for: deepCandidates)
@@ -535,11 +537,13 @@ struct CodexCleanupAgentAdapter: CleanupAgentAnalyzing, CleanupAgentProgressAnal
 
     static func resolveRouting(
         for candidates: [CleanupAgentCandidateInput],
-        routerDeepReview: [CleanupAgentTriageEntry]
+        routerDeepReview: [CleanupAgentTriageEntry],
+        focusedCandidateId: String? = nil
     ) -> CleanupAgentRoutingDecision {
         let known = Set(candidates.map(\.candidateId))
         let unresolved = Set(candidates.compactMap { candidate in
-            candidate.runningApp == nil ? nil : candidate.candidateId
+            candidate.runningApp == nil || candidate.candidateId == focusedCandidateId
+                ? nil : candidate.candidateId
         })
         var reasonByID: [String: String] = [:]
         for entry in routerDeepReview where known.contains(entry.candidateId)
@@ -549,7 +553,9 @@ struct CodexCleanupAgentAdapter: CleanupAgentAnalyzing, CleanupAgentProgressAnal
         for candidate in candidates where candidate.deepReviewRequired
             && !unresolved.contains(candidate.candidateId) {
             reasonByID[candidate.candidateId] = reasonByID[candidate.candidateId]
-                ?? "Burrow requires deep review for this candidate's impact or safety signals."
+                ?? (candidate.candidateId == focusedCandidateId
+                    ? "The user explicitly requested a complete item-level review of this candidate."
+                    : "Burrow requires deep review for this candidate's impact or safety signals.")
         }
         // A parent cleanup would also remove every descendant. Semantic review
         // therefore propagates both ways across an overlapping hierarchy. A

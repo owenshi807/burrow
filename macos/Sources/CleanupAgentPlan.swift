@@ -305,6 +305,32 @@ struct CleanupAgentAnalysisInput: Codable, Equatable, Sendable {
     let planId: String
     let planRevision: Int
     let candidates: [CleanupAgentCandidateInput]
+    /// Non-nil only when the user explicitly asks Codex to reassess one row.
+    /// A focused review must still inspect a protected candidate; protection
+    /// constrains execution later in the reducer, not whether analysis runs.
+    let focusedCandidateId: String?
+
+    init(planId: String, planRevision: Int,
+         candidates: [CleanupAgentCandidateInput],
+         focusedCandidateId: String? = nil) {
+        self.planId = planId
+        self.planRevision = planRevision
+        self.candidates = candidates
+        self.focusedCandidateId = focusedCandidateId
+    }
+
+    private enum CodingKeys: String, CodingKey {
+        case planId, planRevision, candidates, focusedCandidateId
+    }
+
+    init(from decoder: Decoder) throws {
+        let container = try decoder.container(keyedBy: CodingKeys.self)
+        planId = try container.decode(String.self, forKey: .planId)
+        planRevision = try container.decode(Int.self, forKey: .planRevision)
+        candidates = try container.decode([CleanupAgentCandidateInput].self, forKey: .candidates)
+        focusedCandidateId = try container.decodeIfPresent(
+            String.self, forKey: .focusedCandidateId)
+    }
 }
 
 protocol CleanupAgentAnalyzing: Sendable {
@@ -560,6 +586,11 @@ final class CleanupPlanStore: ObservableObject {
         let baseRevision = revision
         currentAgentRunBaseRevision = baseRevision
         let totalBytes = max(Int64(1), runCandidates.reduce(0) { $0 + $1.sizeBytes })
+        let focusedCandidateId: String?
+        switch scope {
+        case .fullPlan: focusedCandidateId = nil
+        case .candidate(let candidateId): focusedCandidateId = candidateId
+        }
         let input = CleanupAgentAnalysisInput(
             planId: planId.uuidString,
             planRevision: baseRevision,
@@ -582,7 +613,8 @@ final class CleanupPlanStore: ObservableObject {
                                 && $0.path.hasPrefix(candidate.path.hasSuffix("/")
                                     ? candidate.path : candidate.path + "/")
                         }))
-            })
+            },
+            focusedCandidateId: focusedCandidateId)
         switch scope {
         case .fullPlan:
             candidateAgentState = nil
@@ -1013,13 +1045,11 @@ final class CleanupPlanStore: ObservableObject {
                 continue
             }
 
-            // Active, refused, or overlapping candidates are already outside
-            // the executable plan. If the Agent's supporting relationship is
-            // not machine-verifiable, the deterministic lock is still enough
-            // to complete this row safely: keep it unselected and attribute
-            // the decision to Burrow, not to the unverified Agent claim. A
-            // protected row must not make the other valid judgments unusable.
-            if candidate.locked {
+            // Plan-wide analysis keeps protected rows on the deterministic
+            // Burrow safety route. Only an explicit row-level request spends
+            // a model turn on a locked item; that user intent is represented
+            // by the candidate scope and handled by the semantic checks below.
+            if candidate.locked, case .fullPlan = scope {
                 let lockReason = Self.lockReasonText(currentLocks[candidate.path])
                 stageSafetyKeep(
                     candidate,
@@ -1066,12 +1096,24 @@ final class CleanupPlanStore: ObservableObject {
             }
             let policy = policyDisposition(proposed: proposal.disposition, candidate: candidate)
             let disposition = policy.disposition
+            var evidence = Array(proposal.evidence.prefix(12))
+            if candidate.locked {
+                evidence.insert(CleanupAgentEvidence(
+                    basis: .observation,
+                    label: NSLocalizedString("Codex item judgment", comment: ""),
+                    detail: proposal.reason), at: 0)
+                evidence.insert(CleanupAgentEvidence(
+                    basis: .observation,
+                    label: NSLocalizedString("Burrow safety check", comment: ""),
+                    detail: Self.lockReasonText(currentLocks[candidate.path])), at: 1)
+                evidence = Array(evidence.prefix(12))
+            }
             recommendations[proposal.candidateId] = CleanupCandidateRecommendation(
                 origin: .agent, disposition: disposition,
                 reason: policy.reason ?? proposal.reason,
                 consequence: policy.consequence ?? proposal.consequence,
                 confidence: min(max(proposal.confidence, 0), 1),
-                evidence: Array(proposal.evidence.prefix(12)), agentRunId: runId,
+                evidence: evidence, agentRunId: runId,
                 investigation: proposal.investigation)
             resolved.insert(proposal.candidateId)
             accepted += 1
@@ -1696,7 +1738,18 @@ final class CleanupPlanStore: ObservableObject {
         candidate: CleanupPlanCandidate
     ) -> (disposition: CleanupRecommendationDisposition, reason: String?, consequence: String?) {
         if candidate.locked {
-            return (.keep, nil, nil)
+            let lockReason = Self.lockReasonText(currentLocks[candidate.path])
+            return (
+                .keep,
+                String(
+                    format: NSLocalizedString(
+                        "Codex completed the item-level analysis. Burrow still keeps this item protected: %@",
+                        comment: "protected candidate Agent analysis result"),
+                    lockReason),
+                NSLocalizedString(
+                    "The selected item was analyzed on its own, but the safety lock prevents it from being added to the executable cleanup plan. The original Codex judgment remains in the evidence below.",
+                    comment: "protected candidate Agent analysis consequence")
+            )
         }
 
         // A parent that contains independently judged candidates is not one

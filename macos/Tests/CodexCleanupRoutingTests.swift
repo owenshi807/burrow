@@ -28,6 +28,18 @@ final class CodexCleanupRoutingTests: XCTestCase {
                        "locked rows must not consume router context")
     }
 
+    func testFocusedReviewRoutesLockedCandidateToDeepAnalysis() {
+        let locked = candidate(
+            "locked", path: "/tmp/running", runningApp: "Messages is open", deep: true)
+
+        let routing = CodexCleanupAgentAdapter.resolveRouting(
+            for: [locked], routerDeepReview: [], focusedCandidateId: locked.candidateId)
+
+        XCTAssertEqual(routing.deepReview.map(\.candidateId), ["locked"])
+        XCTAssertTrue(routing.passThroughCandidateIDs.isEmpty)
+        XCTAssertTrue(routing.unresolvedCandidateIDs.isEmpty)
+    }
+
     func testRoutingKeepsAnOverlappingHierarchyInsideOneSafetyBoundary() {
         let parent = candidate("parent", path: "/tmp/cache")
         let child = candidate("child", path: "/tmp/cache/current-model")
