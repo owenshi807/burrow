@@ -570,6 +570,32 @@ final class CleanupAgentPlanTests: XCTestCase {
         XCTAssertFalse(CodexCleanupAgentAdapter.hasExactBatchCoverage(foreign, targetIDs: ["a", "b"]))
     }
 
+    func testRecommendationSchemaConstrainsBatchCountAndCandidateIdentity() throws {
+        let data = try CodexCleanupAgentAdapter.schemaData(
+            targetCandidateIDs: ["focused-candidate"])
+        let root = try XCTUnwrap(
+            JSONSerialization.jsonObject(with: data) as? [String: Any])
+        let properties = try XCTUnwrap(root["properties"] as? [String: Any])
+        let recommendations = try XCTUnwrap(
+            properties["recommendations"] as? [String: Any])
+        XCTAssertEqual(recommendations["minItems"] as? Int, 1)
+        XCTAssertEqual(recommendations["maxItems"] as? Int, 1)
+
+        let item = try XCTUnwrap(recommendations["items"] as? [String: Any])
+        let itemProperties = try XCTUnwrap(item["properties"] as? [String: Any])
+        let candidateID = try XCTUnwrap(itemProperties["candidateId"] as? [String: Any])
+        XCTAssertEqual(candidateID["enum"] as? [String], ["focused-candidate"])
+
+        let discovered = try XCTUnwrap(
+            properties["discoveredCandidates"] as? [String: Any])
+        let discoveredItem = try XCTUnwrap(discovered["items"] as? [String: Any])
+        let discoveredProperties = try XCTUnwrap(
+            discoveredItem["properties"] as? [String: Any])
+        let parentID = try XCTUnwrap(
+            discoveredProperties["parentCandidateId"] as? [String: Any])
+        XCTAssertEqual(parentID["enum"] as? [String], ["focused-candidate"])
+    }
+
     func testInternalSelfReferenceCannotCompleteCurrentConsumerKeep() async throws {
         let fixture = try makeFixture()
         let analyzer = FakeCleanupAnalyzer(delay: 0) { input in

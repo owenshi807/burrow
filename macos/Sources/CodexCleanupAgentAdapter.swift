@@ -905,7 +905,8 @@ struct CodexCleanupAgentAdapter: CleanupAgentAnalyzing, CleanupAgentProgressAnal
         let data: Data
         do {
             data = try runCodex(
-                executable: executable, prompt: prompt, schema: try schemaData(),
+                executable: executable, prompt: prompt,
+                schema: try schemaData(targetCandidateIDs: targetIDs),
                 stage: stage, runDirectory: runDirectory, processBox: processBox,
                 deadline: deadline)
         } catch let error as CodexCleanupAgentError {
@@ -1205,7 +1206,14 @@ struct CodexCleanupAgentAdapter: CleanupAgentAnalyzing, CleanupAgentProgressAnal
         return String(data: data, encoding: .utf8)
     }
 
-    private static func schemaData() throws -> Data {
+    /// Build the response schema for the exact recommendation batch. Encoding
+    /// the assigned IDs and count into the schema prevents a focused one-row
+    /// reassessment from returning a path, a neighbor ID, or a stale ID and
+    /// only discovering that mismatch after an otherwise valid model turn.
+    /// The runtime still performs `hasExactBatchCoverage` as a second,
+    /// independent fail-closed check.
+    static func schemaData(targetCandidateIDs: [String]) throws -> Data {
+        precondition(!targetCandidateIDs.isEmpty)
         let checkNames = CompactCheckName.allCases.map(\.rawValue)
         let investigationSchema: [String: Any] = [
             "type": "object", "additionalProperties": false,
@@ -1276,7 +1284,10 @@ struct CodexCleanupAgentAdapter: CleanupAgentAnalyzing, CleanupAgentProgressAnal
             ],
         ]
         let recommendationProperties: [String: Any] = [
-            "candidateId": ["type": "string"],
+            "candidateId": [
+                "type": "string",
+                "enum": targetCandidateIDs,
+            ],
             "disposition": ["type": "string", "enum": ["delete", "keep", "human_intent_required"]],
             "reason": ["type": "string", "minLength": 1, "maxLength": 400],
             "consequence": ["type": "string", "minLength": 1, "maxLength": 300],
@@ -1292,7 +1303,8 @@ struct CodexCleanupAgentAdapter: CleanupAgentAnalyzing, CleanupAgentProgressAnal
                 "summary": ["type": "string", "maxLength": 700],
                 "recommendations": [
                     "type": "array",
-                    "maxItems": 4,
+                    "minItems": targetCandidateIDs.count,
+                    "maxItems": targetCandidateIDs.count,
                     "items": [
                         "type": "object",
                         "additionalProperties": false,
@@ -1308,7 +1320,10 @@ struct CodexCleanupAgentAdapter: CleanupAgentAnalyzing, CleanupAgentProgressAnal
                         "required": ["parentCandidateId", "path", "sizeBytes", "disposition",
                                      "reason", "consequence", "confidence", "evidence", "investigation"],
                         "properties": [
-                            "parentCandidateId": ["type": "string"],
+                            "parentCandidateId": [
+                                "type": "string",
+                                "enum": targetCandidateIDs,
+                            ],
                             "path": ["type": "string"],
                             "sizeBytes": ["type": "integer", "minimum": 0],
                             "disposition": ["type": "string", "enum": ["delete", "keep", "human_intent_required"]],
