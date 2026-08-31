@@ -186,8 +186,8 @@ final class CleanupAgentRoutingContractTests: XCTestCase {
     private func makeFixture(count: Int) throws -> (list: CleanList, snapshot: CleanupSnapshot) {
         var items: [CleanList.Item] = []
         for index in 0..<count {
-            let url = root.appendingPathComponent("cache-\(index)", isDirectory: true)
-            try FileManager.default.createDirectory(at: url, withIntermediateDirectories: false)
+            let url = root.appendingPathComponent("Tool-\(index)/Cache", isDirectory: true)
+            try FileManager.default.createDirectory(at: url, withIntermediateDirectories: true)
             items.append(.init(
                 path: url.path,
                 sizeBytes: Int64((index + 1) * 1_000),

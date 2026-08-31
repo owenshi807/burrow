@@ -17,7 +17,8 @@ enum CleanImpactRanker {
         if c.contains("document") || c.contains("state") || c.contains("essential") { return 3 }
         if c.contains("log") || c.contains("leftover") || c.contains("trash") { return 2 }
         if c.contains("download") || c.contains("derived") || c.contains("build") || c.contains("artifact") { return 1 }
-        return 0   // caches + everything else: safest
+        if c.contains("cache") || c.contains("browser") { return 0 }
+        return 3   // unknown is not a synonym for regenerable cache
     }
 
     /// Stable ascending-impact sort, preserving input order within a rank.

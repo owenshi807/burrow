@@ -1,6 +1,6 @@
 # Burrow Agent Cleanup Preview
 
-Build date: 2026-08-21
+Build date: 2026-08-31
 Branch: `feat/agent-cleanup-plan`
 
 ## Product memory
@@ -74,9 +74,10 @@ details stay collapsed until requested.
 ## Deliberately deferred
 
 This is the first end-to-end Agent-native slice, not the complete platform.
-Generic MCP/Agent adapters, discovery outside an existing scanner candidate,
-and a durable cross-restart decision journal remain follow-up work. The current
-build fails safely to scanner-only review when Codex is absent or unavailable.
+Generic Agent adapters and discovery outside an existing scanner candidate
+remain follow-up work. A durable cross-restart cleanup ledger and an exact
+staged-plan MCP capability now ship in the 0.15.0 preview. The current build
+fails safely to conservative scanner-only review when Codex is absent or unavailable.
 
 ## Distribution note
 

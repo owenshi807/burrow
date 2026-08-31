@@ -536,16 +536,16 @@ final class CleanupPlanStore: ObservableObject {
         pathToCandidateId = Dictionary(candidates.map { ($0.path, $0.id) },
                                        uniquingKeysWith: { first, _ in first })
         recommendations = Dictionary(candidates.map { candidate in
-            let scannerDisposition: CleanupRecommendationDisposition = candidate.locked ? .keep : .delete
-            let policy = policyDisposition(proposed: scannerDisposition, candidate: candidate)
+            let scanner = deterministicScannerRecommendation(for: candidate)
+            let policy = policyDisposition(proposed: scanner.disposition, candidate: candidate)
             let disposition = policy.disposition
-            let reason = effectiveLocks[candidate.path].map(Self.lockReasonText)
+            let reason = currentLocks[candidate.path].map(Self.lockReasonText)
                 ?? policy.reason
-                ?? NSLocalizedString("The deterministic scanner classified this as removable cache data.", comment: "")
+                ?? scanner.reason
             return (candidate.id, CleanupCandidateRecommendation(
                 origin: .scanner, disposition: disposition, reason: reason,
-                consequence: policy.consequence ?? CleanReviewView.consequence(for: candidate.category),
-                confidence: nil, evidence: [], agentRunId: nil))
+                consequence: policy.consequence ?? scanner.consequence,
+                confidence: nil, evidence: scanner.evidence, agentRunId: nil))
         }, uniquingKeysWith: { first, _ in first })
         if var staged = selection {
             for candidate in candidates
@@ -933,20 +933,16 @@ final class CleanupPlanStore: ObservableObject {
             // A pass-through is explicitly not an Agent recommendation. Restore
             // deterministic scanner provenance on retries while preserving the
             // current checkbox, including any user override made during the run.
-            let scannerDisposition: CleanupRecommendationDisposition = candidate.locked
-                ? .keep : .delete
-            let policy = policyDisposition(proposed: scannerDisposition, candidate: candidate)
+            let scanner = deterministicScannerRecommendation(for: candidate)
+            let policy = policyDisposition(proposed: scanner.disposition, candidate: candidate)
             let lockReason = currentLocks[candidate.path].map(Self.lockReasonText)
             recommendations[candidate.id] = CleanupCandidateRecommendation(
                 origin: .scanner,
                 disposition: policy.disposition,
-                reason: lockReason ?? policy.reason ?? NSLocalizedString(
-                    "The deterministic scanner classified this as removable cache data.",
-                    comment: "scanner pass-through reason"),
-                consequence: policy.consequence
-                    ?? CleanReviewView.consequence(for: candidate.category),
+                reason: lockReason ?? policy.reason ?? scanner.reason,
+                consequence: policy.consequence ?? scanner.consequence,
                 confidence: nil,
-                evidence: [],
+                evidence: scanner.evidence,
                 agentRunId: nil)
             accepted += 1
         }
@@ -1731,6 +1727,46 @@ final class CleanupPlanStore: ObservableObject {
         } else {
             userOverrides.insert(candidate.id)
         }
+    }
+
+    /// The scanner identifies filesystem candidates; this policy supplies the
+    /// conservative, model-free meaning Burrow can defend on its own. Unknown
+    /// is an explicit intent decision, never an implicit deletion.
+    private func deterministicScannerRecommendation(
+        for candidate: CleanupPlanCandidate
+    ) -> (disposition: CleanupRecommendationDisposition,
+          reason: String, consequence: String, evidence: [CleanupAgentEvidence]) {
+        let item = CleanList.Item(
+            path: candidate.path, sizeBytes: candidate.sizeBytes,
+            sizeText: candidate.sizeText, itemCount: candidate.itemCount)
+        let meaning = CleanupCandidatePolicy.classify(
+            item: item, category: candidate.category, lock: currentLocks[candidate.path])
+        let disposition: CleanupRecommendationDisposition
+        switch meaning.disposition {
+        case .recommendCleanup: disposition = .delete
+        case .review: disposition = .humanIntentRequired
+        case .protect: disposition = .keep
+        }
+        let consequence: String
+        switch meaning.disposition {
+        case .recommendCleanup:
+            consequence = CleanReviewView.consequence(for: candidate.category)
+        case .review:
+            consequence = NSLocalizedString(
+                "Burrow leaves this item unselected until its owner, current consumer, and recovery cost are established.",
+                comment: "deterministic scanner review consequence")
+        case .protect:
+            consequence = NSLocalizedString(
+                "Burrow excludes this item from the default cleanup plan to protect active or user-authored state.",
+                comment: "deterministic scanner protect consequence")
+        }
+        return (
+            disposition, meaning.reason, consequence,
+            meaning.evidence.map {
+                CleanupAgentEvidence(basis: .observation,
+                                     label: NSLocalizedString("Burrow safety policy", comment: ""),
+                                     detail: $0)
+            })
     }
 
     private func policyDisposition(

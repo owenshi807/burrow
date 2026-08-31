@@ -402,7 +402,11 @@ final class CleanupAuthorizationTests: XCTestCase {
             return fakeTrash
         }
 
-        XCTAssertEqual(result, .init(moved: 0, skipped: 1, failed: 0))
+        XCTAssertEqual(result.moved, 0)
+        XCTAssertEqual(result.skipped, 1)
+        XCTAssertEqual(result.failed, 0)
+        XCTAssertEqual(result.outcomes.map(\.path), [reviewed.path])
+        XCTAssertEqual(result.outcomes.map(\.status), [.skipped])
         XCTAssertEqual(try String(contentsOf: reviewed.appendingPathComponent("marker")),
                        "unreviewed", "the raced object must be restored, not deleted")
         XCTAssertEqual(try String(contentsOf: original.appendingPathComponent("marker")),

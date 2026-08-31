@@ -512,24 +512,56 @@ struct CleanupSnapshot: Sendable, Equatable {
 }
 
 enum CleanupExecutor {
+    struct Outcome: Sendable, Equatable {
+        enum Status: Sendable, Equatable { case trashed, skipped, failed }
+        let path: String
+        let status: Status
+        let destination: String?
+        let detail: String?
+    }
+
     struct Result: Sendable, Equatable {
         let moved: Int
         let skipped: Int
         let failed: Int
+        let outcomes: [Outcome]
+
+        init(moved: Int, skipped: Int, failed: Int, outcomes: [Outcome] = []) {
+            self.moved = moved
+            self.skipped = skipped
+            self.failed = failed
+            self.outcomes = outcomes
+        }
     }
 
     static func moveToTrash(_ plan: CleanupExecutionPlan,
                             move: (URL) throws -> URL = systemTrashMove) -> Result {
         guard plan.validateEnvelopeForLaunch() else {
-            return Result(moved: 0, skipped: 0, failed: plan.items.count)
+            return Result(
+                moved: 0, skipped: 0, failed: plan.items.count,
+                outcomes: plan.items.map {
+                    Outcome(path: $0.identity.path, status: .failed, destination: nil,
+                            detail: "The cleanup plan failed its launch validation.")
+                })
         }
         var moved = 0, skipped = 0, failed = 0
+        var outcomes: [Outcome] = []
         for item in plan.items {
-            guard item.identity.matchesCurrent() else { skipped += 1; continue }
+            guard item.identity.matchesCurrent() else {
+                skipped += 1
+                outcomes.append(.init(path: item.identity.path, status: .skipped,
+                                      destination: nil, detail: "The item changed after review."))
+                continue
+            }
             let flags = O_RDONLY | O_NOFOLLOW | O_CLOEXEC |
                 (item.identity.isDirectory ? O_DIRECTORY : 0)
             let descriptor = Darwin.open(item.identity.path, flags)
-            guard descriptor >= 0 else { skipped += 1; continue }
+            guard descriptor >= 0 else {
+                skipped += 1
+                outcomes.append(.init(path: item.identity.path, status: .skipped,
+                                      destination: nil, detail: "The item could not be opened safely."))
+                continue
+            }
             defer { Darwin.close(descriptor) }
             var opened = stat()
             guard fstat(descriptor, &opened) == 0,
@@ -538,6 +570,8 @@ enum CleanupExecutor {
                   UInt32(opened.st_uid) == item.identity.owner,
                   UInt16(opened.st_mode) == item.identity.mode else {
                 skipped += 1
+                outcomes.append(.init(path: item.identity.path, status: .skipped,
+                                      destination: nil, detail: "The opened item no longer matched the reviewed identity."))
                 continue
             }
             do {
@@ -556,14 +590,20 @@ enum CleanupExecutor {
                     // if its name was occupied again, leave it in Trash.
                     restoreUnreviewedItem(at: destination, to: source)
                     skipped += 1
+                    outcomes.append(.init(path: item.identity.path, status: .skipped,
+                                          destination: nil, detail: "A path race was detected; the unreviewed object was restored."))
                     continue
                 }
                 moved += 1
+                outcomes.append(.init(path: item.identity.path, status: .trashed,
+                                      destination: destination.path, detail: nil))
             } catch {
                 failed += 1
+                outcomes.append(.init(path: item.identity.path, status: .failed,
+                                      destination: nil, detail: error.localizedDescription))
             }
         }
-        return Result(moved: moved, skipped: skipped, failed: failed)
+        return Result(moved: moved, skipped: skipped, failed: failed, outcomes: outcomes)
     }
 
     private static func systemTrashMove(_ source: URL) throws -> URL {

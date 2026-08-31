@@ -82,6 +82,12 @@ struct MCPResources {
               mimeType: "application/json", tool: "burrow_deleted_files", arguments: [:],
               ttlMs: MCPProtocol.Cache.digestTTL),
 
+        Fixed(uri: "burrow://cleanup/runs", name: "cleanup_runs",
+              title: "Burrow cleanup receipts",
+              description: "Unified GUI and Agent cleanup runs with plan, initiator, mode, status, and per-item receipts.",
+              mimeType: "application/json", tool: "burrow_cleanup_runs", arguments: [:],
+              ttlMs: MCPProtocol.Cache.liveTTL),
+
         Fixed(uri: "burrow://agent-audit", name: "agent_audit",
               title: "What agents have done",
               description: "Every mutating tool call an agent has made through this server in the last week, with its arguments and outcome.",
@@ -287,19 +293,21 @@ struct MCPResources {
                 entries don't drown the result, and analyze a specific subdirectory rather than \
                 rescanning everything.
 
-                Then preview the safe wins: burrow_clean without confirm (that's a dry run), \
-                burrow_purge for build artifacts, and burrow_dupes on the directories that looked \
-                heavy. Rank what you found by bytes-per-risk and show me the list.
+                Then call burrow_stage_cleanup_plan and inspect its typed candidate meanings, plus \
+                burrow_purge for build artifacts and burrow_dupes on the directories that looked \
+                heavy. Rank what you found by bytes-per-risk and show me the exact candidate IDs.
 
-                Do not pass confirm:true to anything. I'll decide what gets deleted.
+                Do not call burrow_execute_cleanup_plan and do not pass confirm:true to anything. \
+                I'll decide what gets moved to Trash.
                 """
         case "explain_last_cleanup":
             description = "Explain what the last cleanup actually removed."
             text = """
-                What did the last cleanup actually do? Call burrow_cleanup_history for the session \
-                summary, then burrow_deleted_files for the exact paths. Group the paths by what \
-                they belonged to, tell me the total reclaimed, and flag anything that looks like it \
-                shouldn't have been touched.
+                What did the last cleanup actually do? Call burrow_cleanup_runs first for Burrow's \
+                unified receipt. If the latest run is legacy engine-managed, also call \
+                burrow_cleanup_history and burrow_deleted_files for its exact paths. Group the \
+                paths by owner, tell me the selected/reclaimed totals, distinguish Trash from \
+                permanent removal, and flag anything that should not have been touched.
                 """
         case "investigate_process":
             guard let process = arg("name") else { return nil }

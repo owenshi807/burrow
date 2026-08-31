@@ -145,12 +145,13 @@ final class MCPTests: XCTestCase {
                        ["burrow_snapshot", "burrow_history", "burrow_top_processes",
                         "burrow_process_usage", "burrow_disk_forecast", "burrow_diff",
                         "burrow_report", "burrow_doctor", "burrow_ports", "burrow_info",
-                        "burrow_cleanup_history", "burrow_deleted_files",
+                        "burrow_cleanup_history", "burrow_deleted_files", "burrow_cleanup_runs",
                         "burrow_analyze", "burrow_list_apps",
                         "burrow_dupes", "burrow_net", "burrow_orphans",
                         "burrow_photos", "burrow_rules_dryrun", "burrow_sentinel",
                         "burrow_slim_check", "burrow_agent_audit", "burrow_anomalies",
-                        "burrow_clean",
+                        "burrow_clean", "burrow_stage_cleanup_plan",
+                        "burrow_execute_cleanup_plan",
                         "burrow_optimize", "burrow_uninstall", "burrow_purge",
                         "burrow_installer"])
         // Every tool must carry an inputSchema and a description.
@@ -158,6 +159,39 @@ final class MCPTests: XCTestCase {
             XCTAssertNotNil(tool["description"] as? String)
             XCTAssertNotNil(tool["inputSchema"] as? [String: Any])
         }
+    }
+
+    func testLegacyCleanConfirmRequiresAnExactStagedPlan() throws {
+        Store.d = UserDefaults(suiteName: StoreTests.scratchSuite)!
+        Store.mcpActionsEnabled = true
+        let json = try catalog.call(name: "burrow_clean", arguments: ["confirm": true])
+        let object = try XCTUnwrap(
+            try JSONSerialization.jsonObject(with: Data(json.utf8)) as? [String: Any])
+        XCTAssertEqual(object["blocked"] as? Bool, true)
+        XCTAssertEqual(object["ran"] as? Bool, false)
+        XCTAssertTrue((object["reason"] as? String)?.contains("burrow_stage_cleanup_plan") == true)
+    }
+
+    func testCleanupRunsReturnsObjectEnvelopesForListAndDetail() throws {
+        let ledger = CleanupLedger(directory: tempDir.appendingPathComponent("cleanup-runs"))
+        var run = CleanupRunRecord.reviewed(
+            source: .agent, mode: .trash, initiatedBy: "Test Agent", items: [])
+        run.status = .completed
+        run.endedAt = Date()
+        try ledger.record(run)
+        let local = ToolCatalog(db: db, cleanupLedger: ledger)
+
+        let listJSON = try local.call(name: "burrow_cleanup_runs", arguments: [:])
+        let list = try XCTUnwrap(
+            try JSONSerialization.jsonObject(with: Data(listJSON.utf8)) as? [String: Any])
+        XCTAssertEqual((list["runs"] as? [[String: Any]])?.count, 1)
+
+        let detailJSON = try local.call(
+            name: "burrow_cleanup_runs", arguments: ["run_id": run.id.uuidString])
+        let detail = try XCTUnwrap(
+            try JSONSerialization.jsonObject(with: Data(detailJSON.utf8)) as? [String: Any])
+        XCTAssertEqual((detail["run"] as? [String: Any])?["id"] as? String,
+                       run.id.uuidString)
     }
 
     func testCallSnapshot_returnsLatestRow() throws {

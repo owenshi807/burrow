@@ -476,7 +476,7 @@ Windows preview builds include the stdio bridge in source under
 `windows/Tools/McpStdioBridge/` and in release artifacts as
 `Assets\Mcp\burrow-mcp-stdio.exe`.
 
-**Tools** — 19 over MCP, read-only by default. The full reference, with **when an
+**Tools** — exposed over MCP and read-only by default. The full reference, with **when an
 agent should reach for each**, is in **[docs/agent-tools.md](docs/agent-tools.md)**.
 The essentials:
 
@@ -487,12 +487,17 @@ The essentials:
   SIP/Gatekeeper/FileVault/firewall, battery, high-CPU, display/volume/network),
   `burrow_ports`, `burrow_info`
 - **Disk & apps** — `burrow_analyze`, `burrow_list_apps`, `burrow_cleanup_history`,
-  `burrow_deleted_files`
-- **Maintain (gated)** — `burrow_clean`, `burrow_optimize`, `burrow_uninstall`,
+  `burrow_deleted_files`, `burrow_cleanup_runs`
+- **Exact Agent cleanup** — `burrow_stage_cleanup_plan` freezes typed candidate IDs;
+  `burrow_execute_cleanup_plan` revalidates and moves only Burrow-approved IDs to Trash
+- **Maintain (gated)** — `burrow_clean` (legacy preview), `burrow_optimize`, `burrow_uninstall`,
   `burrow_purge`, `burrow_installer`
 
-Actuating tools preview (`--dry-run`) unless `confirm:true` **and** the matching
-Settings opt-in is enabled — an agent can always look, but only acts with your say-so.
+Agent cleanup is a two-step capability: stage a plan, inspect its typed meaning, then
+execute exact candidate IDs with `confirm:true` and the matching Settings opt-in.
+Burrow rechecks identity and subtree changes at execution, skips drifted items, moves
+the stable subset to Trash, and records a per-item receipt. The legacy `burrow_clean`
+can still preview but no longer accepts broad Agent execution.
 
 Windows also keeps `burrow_uninstall(action=...)` as a compatibility tool for
 list, leftover-preview, and confirmed vendor-uninstaller launch workflows.

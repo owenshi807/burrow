@@ -56,6 +56,7 @@ not verdicts; evidence is typed; and probabilistic advice never grants deletion 
 |---|---|---|
 | **burrow_cleanup_history** | "What has Burrow cleaned / how much space have I reclaimed?" Itemised past clean/optimize/purge/uninstall sessions with bytes freed and removed/trashed/skipped/failed breakdowns. | `limit` |
 | **burrow_deleted_files** | "What exactly did it delete?" / "did it remove <file>?" Exact paths Burrow trashed or removed, newest first, with action + status. Report-only. | `limit` |
+| **burrow_cleanup_runs** | "Show me the Burrow receipt for that cleanup." Lists unified GUI/MCP cleanup runs; pass `run_id` for every candidate's policy, selection, action, outcome, skip reason, and Trash destination. | `run_id`, `limit` |
 
 ## Disk & apps (read-only)
 
@@ -84,20 +85,24 @@ bundled conductor they return a JSON error object saying so (never a crash).
 
 ## Act & maintain (actuating — gated, dry-run by default)
 
-These mutate the system. **Default to the preview**, show the user what would happen, and only
-pass `confirm: true` when they've explicitly approved *and* you understand the opt-in may block
-it. Real cleans run at user level (not elevated).
+Cleanup is a staged capability, not a path-taking delete API. First create a plan, present the
+typed candidates, then execute only exact IDs the user approved. The Settings opt-in is still
+required. Plan age alone never invalidates it; filesystem identity or subtree drift does, and
+changed items are skipped at execution.
 
 | Tool | What a real run does | Safety | Key params |
 |---|---|---|---|
-| **burrow_clean** | Removes caches, logs, temp files, leftovers (`mo clean`). The scan can take minutes on a full disk; a `timed_out: true` result means the run was killed, not that nothing needed cleaning. | Dry-run unless `confirm:true` **and** "Let agents run cleanups" is on, else blocked. | `confirm` |
+| **burrow_clean** | Legacy engine preview of caches, logs, temp files, and leftovers. | Preview only. `confirm:true` is refused so an Agent cannot approve a different filesystem set than the one Burrow staged. | `confirm` |
+| **burrow_stage_cleanup_plan** | Scans and freezes immutable candidate IDs with Burrow's model-free disposition, owner hint, recoverability, regeneration cost, and evidence. | Read-only. Unknown ownership is `review`, local models are never default-selected, and active/refused paths are protected. | — |
+| **burrow_execute_cleanup_plan** | Moves the exact selected subset from a staged plan to Trash. | Requires `plan_id`, matching `revision`, unique Burrow-issued `candidate_ids`, `confirm:true`, and the Settings opt-in. Only deterministic `recommend_cleanup` candidates execute over MCP; every path is revalidated and a complete receipt is written. | `plan_id`, `revision`, `candidate_ids`, `confirm` |
 | **burrow_optimize** | Refreshes caches/services, safe maintenance (`mo optimize`). | Same gate as clean. | `confirm` |
 | **burrow_uninstall** | Uninstalls apps + leftovers (`mo uninstall`). Files go to Trash unless `permanent:true`. | Needs `confirm:true` **and both** opt-ins; aborts unless the matcher resolves exactly the apps you named. Call `burrow_list_apps` first. | `apps` (required), `confirm`, `permanent` |
 | **burrow_purge** | Finds dev build artifacts (`node_modules`, `target/`, …). | **Preview-only over MCP** — returns the dry-run list; the real purge is an interactive flow in the app. | `confirm` (reserved) |
 | **burrow_installer** | Finds leftover installers (`.dmg`/`.pkg`/…). | **Preview-only over MCP**, like purge. | `confirm` (reserved) |
 
-Every actuating call is recorded to Burrow's audit log, so the user can see what an agent did —
-and `burrow_agent_audit` reads that log back, so you can see it too.
+Every actuating call is recorded to Burrow's Agent audit. Cleanup additionally writes a durable,
+per-item receipt readable with `burrow_cleanup_runs`, including partial, failed, stopped, and
+changed-since-scan outcomes.
 
 ---
 
@@ -106,6 +111,7 @@ and `burrow_agent_audit` reads that log back, so you can see it too.
 **Resources** — the read-only answers agents re-poll most, attachable instead of re-called.
 `burrow://snapshot/latest`, `burrow://doctor`, `burrow://ports`, `burrow://info`,
 `burrow://forecast/disk`, `burrow://cleanup/history`, `burrow://cleanup/deleted-files`,
+`burrow://cleanup/runs`,
 `burrow://agent-audit`, `burrow://anomalies`, `burrow://report/weekly`, plus templates
 `burrow://history/{minutes}`, `burrow://processes/{metric}`, and `burrow://report/{days}`.
 Each read carries a `ttlMs` telling you how long it stays honest — five seconds for a live

@@ -272,6 +272,14 @@ enum MCPToolMetadata {
                 ]), "Newest first."),
             ])),
 
+        "burrow_cleanup_runs": Entry(
+            title: "Burrow cleanup receipts", readOnly: true, destructive: false,
+            idempotent: true, openWorld: false,
+            outputSchema: Self.withError([
+                "runs": Self.arr(of: Self.object([:]), "Newest Burrow-owned cleanup runs."),
+                "run": Self.object([:]),
+            ])),
+
         "burrow_analyze": Entry(
             title: "Disk usage breakdown", readOnly: true, destructive: false,
             idempotent: true, openWorld: true,
@@ -369,6 +377,32 @@ enum MCPToolMetadata {
             title: "Clean caches and temp files", readOnly: false, destructive: true,
             idempotent: true, openWorld: true, outputSchema: Self.actionResult),
 
+        "burrow_stage_cleanup_plan": Entry(
+            title: "Stage an exact cleanup plan", readOnly: true, destructive: false,
+            idempotent: false, openWorld: true,
+            outputSchema: Self.withError([
+                "id": Self.str("Immutable plan UUID."),
+                "revision": Self.int("Plan revision required for execution."),
+                "createdAt": Self.str("When the filesystem identities were captured."),
+                "candidates": Self.arr(of: Self.object([:]),
+                                       "Typed candidates with stable IDs and Burrow safety judgments."),
+                "scannerSkipped": Self.object([:]),
+                "executionState": Self.str("staged, executing, or completed."),
+            ])),
+
+        "burrow_execute_cleanup_plan": Entry(
+            title: "Execute an exact cleanup plan", readOnly: false, destructive: true,
+            idempotent: false, openWorld: true,
+            outputSchema: Self.withError([
+                "id": Self.str("Cleanup run UUID."),
+                "planID": Self.str("The staged plan that authorized this run."),
+                "planRevision": Self.int("The exact revision that was consumed."),
+                "status": Self.str("completed, partial, failed, or stopped."),
+                "items": Self.arr(of: Self.object([:]),
+                                  "Per-candidate decision, action, outcome, and recovery destination."),
+                "summary": Self.str("Human-readable result summary."),
+            ])),
+
         "burrow_optimize": Entry(
             title: "Run system maintenance", readOnly: false, destructive: false,
             idempotent: true, openWorld: true, outputSchema: Self.actionResult),
@@ -409,6 +443,7 @@ enum MCPToolMetadata {
     /// back as `timed_out: true`, which reads like "nothing to do".
     static let longRunning: Set<String> = [
         "burrow_analyze", "burrow_dupes", "burrow_photos", "burrow_orphans",
-        "burrow_clean", "burrow_optimize", "burrow_uninstall", "burrow_purge", "burrow_installer",
+        "burrow_clean", "burrow_stage_cleanup_plan", "burrow_execute_cleanup_plan",
+        "burrow_optimize", "burrow_uninstall", "burrow_purge", "burrow_installer",
     ]
 }

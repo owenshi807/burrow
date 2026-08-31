@@ -84,6 +84,7 @@ struct CleanView: View {
     @State private var realRunContext: CleanRunContext?
     @State private var realRunStartedAt: Date?
     @State private var realRunCurrentPath: String?
+    @State private var activeCleanupReceipt: CleanupRunRecord?
     @AppStorage("cleanupAgentConsent.v1") private var cleanupAgentConsent = false
     @Environment(\.accessibilityReduceMotion) private var reduceMotion
 
@@ -148,6 +149,10 @@ struct CleanView: View {
             let path = String(line.dropFirst(CleanupRuntimeTranscript.cleaningPrefix.count))
             if !path.isEmpty { realRunCurrentPath = path }
         }
+        .onChange(of: realRunCompletionMarker) { _, marker in
+            guard let marker else { return }
+            finishActiveCleanupReceipt(marker: marker)
+        }
         .overlay(alignment: .bottom) {
             if let result = trashResult {
                 DoneBanner(accent: Tool.clean.accent, title: "Moved to Trash", detail: result)
@@ -204,6 +209,12 @@ struct CleanView: View {
         realRunContext = .engineManaged
         realRunStartedAt = Date()
         realRunCurrentPath = nil
+        let receipt = CleanupRunRecord.reviewed(
+            source: .manual, mode: .engineManaged,
+            initiatedBy: NSLocalizedString("You in Burrow", comment: "cleanup receipt initiator"),
+            items: [])
+        activeCleanupReceipt = receipt
+        try? CleanupLedger.shared.record(receipt)
         // No cleanup plan: the engine chooses its own targets, so this routes
         // to the plain `clean` operation rather than the reviewed one.
         //
@@ -478,6 +489,35 @@ struct CleanView: View {
         guard confirmation.runModalQuiet() == .alertFirstButtonReturn else { return }
 
         screen = .hero
+        let requested = Set(selectedPaths)
+        let executable = Set(plan.items.map(\.identity.path))
+        let changedSet = Set(changed)
+        let receiptItems = selection.list.categories.flatMap { category in
+            category.items.map { item -> CleanupRunRecord.Item in
+                let selected = requested.contains(item.path)
+                let canExecute = executable.contains(item.path)
+                return CleanupRunRecord.Item(
+                    id: agentPlan.candidates.first(where: { $0.path == item.path })?.id
+                        ?? item.path,
+                    path: item.path, displayName: item.displayName,
+                    category: category.name, sizeBytes: item.sizeBytes,
+                    policy: CleanupCandidatePolicy.classify(
+                        item: item, category: category.name, lock: reviewLocked[item.path]),
+                    selected: selected, action: canExecute ? .remove : .none,
+                    outcome: canExecute ? .pending : .skipped,
+                    detail: selected && changedSet.contains(item.path)
+                        ? "The item changed or became active after review."
+                        : (selected ? nil : "Not selected by the user."),
+                    trashDestination: nil)
+            }
+        }
+        let receipt = CleanupRunRecord.reviewed(
+            planID: agentPlan.planId.uuidString.lowercased(),
+            revision: agentPlan.revision, source: .manual, mode: .permanent,
+            initiatedBy: NSLocalizedString("You in Burrow", comment: "cleanup receipt initiator"),
+            items: receiptItems)
+        activeCleanupReceipt = receipt
+        try? CleanupLedger.shared.record(receipt)
         realRunContext = .reviewed(cleaned.flatMap(\.1))
         realRunStartedAt = Date()
         realRunCurrentPath = nil
@@ -564,6 +604,26 @@ struct CleanView: View {
 
         screen = .hero
         let opID = UUID()
+        let selectedSet = Set(selectedPaths)
+        let receiptItems = selection.list.categories.flatMap { category in
+            category.items.map { item in
+                CleanupRunRecord.Item(
+                    id: item.path, path: item.path, displayName: item.displayName,
+                    category: category.name, sizeBytes: item.sizeBytes,
+                    policy: CleanupCandidatePolicy.classify(
+                        item: item, category: category.name, lock: reviewLocked[item.path]),
+                    selected: selectedSet.contains(item.path), action: .none,
+                    outcome: selectedSet.contains(item.path) ? .pending : .skipped,
+                    detail: selectedSet.contains(item.path) ? nil : "Not selected by the user.",
+                    trashDestination: nil)
+            }
+        }
+        let initialReceipt = CleanupRunRecord.reviewed(
+            id: opID, planID: agentPlan.planId.uuidString.lowercased(),
+            revision: agentPlan.revision, source: .manual, mode: .trash,
+            initiatedBy: NSLocalizedString("You in Burrow", comment: "cleanup receipt initiator"),
+            items: receiptItems)
+        try? CleanupLedger.shared.record(initialReceipt)
         OperationCenter.shared.begin(opID, label: NSLocalizedString("Moving caches to Trash", comment: ""),
                                      notifiesOnEnd: true)
         DispatchQueue.global(qos: .userInitiated).async {
@@ -571,6 +631,32 @@ struct CleanView: View {
             let moved = result.moved
             let skipped = changedPaths.count + result.skipped
             let failed = result.failed
+            let outcomes = Dictionary(
+                result.outcomes.map { ($0.path, $0) },
+                uniquingKeysWith: { first, _ in first })
+            var finishedReceipt = initialReceipt
+            for index in finishedReceipt.items.indices where finishedReceipt.items[index].selected {
+                let path = finishedReceipt.items[index].path
+                finishedReceipt.items[index].action = .trash
+                if changedPaths.contains(path) {
+                    finishedReceipt.items[index].outcome = .skipped
+                    finishedReceipt.items[index].detail = "The item changed or became active after review."
+                } else if let outcome = outcomes[path] {
+                    switch outcome.status {
+                    case .trashed: finishedReceipt.items[index].outcome = .trashed
+                    case .skipped: finishedReceipt.items[index].outcome = .skipped
+                    case .failed: finishedReceipt.items[index].outcome = .failed
+                    }
+                    finishedReceipt.items[index].detail = outcome.detail
+                    finishedReceipt.items[index].trashDestination = outcome.destination
+                }
+            }
+            finishedReceipt.endedAt = Date()
+            finishedReceipt.status = failed > 0
+                ? (moved > 0 ? .partial : .failed)
+                : (skipped > 0 ? .partial : .completed)
+            finishedReceipt.summary = "\(moved) moved to Trash · \(skipped) skipped · \(failed) failed"
+            try? CleanupLedger.shared.record(finishedReceipt)
             DispatchQueue.main.async {
                 OperationCenter.shared.end(opID, success: failed == 0,
                                            detail: String(format: NSLocalizedString("%d moved · %d skipped · %d failed", comment: ""), moved, skipped, failed))
@@ -784,6 +870,70 @@ struct CleanView: View {
         case .finished(.failed(let m)): return String(format: NSLocalizedString("Failed: %@", comment: ""), m)
         case .idle, .gated: return ""
         }
+    }
+
+    private var realRunCompletionMarker: String? {
+        switch realFlow.state {
+        case .finished(.done(let exit)): return "done:\(exit)"
+        case .finished(.cancelled): return "cancelled"
+        case .finished(.failed(let message)): return "failed:\(message)"
+        case .idle, .gated, .running: return nil
+        }
+    }
+
+    /// Close the durable receipt from observable postconditions, not the
+    /// subprocess's optimistic exit code. A stopped or failed run can still
+    /// have removed an earlier item, and the history must say so.
+    private func finishActiveCleanupReceipt(marker: String) {
+        guard var receipt = activeCleanupReceipt else { return }
+        activeCleanupReceipt = nil
+        receipt.endedAt = Date()
+
+        if receipt.mode == .engineManaged {
+            if marker == "cancelled" { receipt.status = .stopped }
+            else if marker.hasPrefix("done:0") { receipt.status = .completed }
+            else { receipt.status = .failed }
+            if let summary = realFlow.report?.summary {
+                receipt.summary = summary.completionLine
+                let bytes = summary.freeChange.isEmpty ? summary.space : summary.freeChange
+                receipt.reclaimedBytes = CleanList.parseSize(
+                    bytes.trimmingCharacters(in: CharacterSet(charactersIn: "+")))
+            } else {
+                receipt.summary = realStatusText
+            }
+            try? CleanupLedger.shared.record(receipt)
+            return
+        }
+
+        let lines = realFlow.rawLog.components(separatedBy: .newlines)
+        let runtimeSkipped = CleanupRuntimeTranscript.paths(
+            in: lines, prefix: CleanupRuntimeTranscript.skippedPrefix)
+        for index in receipt.items.indices
+        where receipt.items[index].selected && receipt.items[index].outcome == .pending {
+            let path = receipt.items[index].path
+            if !FileManager.default.fileExists(atPath: path) {
+                receipt.items[index].outcome = .removed
+            } else if runtimeSkipped.contains(path) || marker == "cancelled" {
+                receipt.items[index].outcome = .skipped
+                receipt.items[index].detail = marker == "cancelled"
+                    ? "Cleanup was stopped before this item was removed."
+                    : "The item changed or became active at the execution boundary."
+            } else {
+                receipt.items[index].outcome = .failed
+                receipt.items[index].detail = "The item still exists after the cleanup attempt."
+            }
+        }
+        let selected = receipt.items.filter(\.selected)
+        let removed = selected.filter { $0.outcome == .removed }
+        let skipped = selected.filter { $0.outcome == .skipped }.count
+        let failed = selected.filter { $0.outcome == .failed }.count
+        receipt.reclaimedBytes = removed.reduce(0) { $0 + $1.sizeBytes }
+        if marker == "cancelled" { receipt.status = .stopped }
+        else if failed > 0 { receipt.status = removed.isEmpty ? .failed : .partial }
+        else if skipped > 0 { receipt.status = removed.isEmpty ? .failed : .partial }
+        else { receipt.status = .completed }
+        receipt.summary = "\(removed.count) removed · \(skipped) skipped · \(failed) failed"
+        try? CleanupLedger.shared.record(receipt)
     }
 
     // (The post-run detail line lives on TaskSummary.completionLine —

@@ -307,8 +307,10 @@ final class CleanupAgentPlanTests: XCTestCase {
         store.load(list: list, snapshot: snapshot, locked: [:], hasAgentConsent: true)
 
         let baseline = try XCTUnwrap(store.candidates.first)
-        XCTAssertEqual(store.recommendation(for: baseline.id).disposition, .delete)
-        XCTAssertTrue(store.isSelected(baseline))
+        XCTAssertEqual(store.recommendation(for: baseline.id).disposition,
+                       .humanIntentRequired,
+                       "an ambiguous large asset is not a model-free safe delete")
+        XCTAssertFalse(store.isSelected(baseline))
         store.startAgentAnalysis()
         try await waitUntilReady(store)
 
@@ -1568,10 +1570,12 @@ final class CleanupAgentPlanTests: XCTestCase {
     }
 
     private func makeFixture() throws -> (list: CleanList, snapshot: CleanupSnapshot) {
-        let active = root.appendingPathComponent("active-model")
-        let old = root.appendingPathComponent("old-build")
-        try FileManager.default.createDirectory(at: active, withIntermediateDirectories: false)
-        try FileManager.default.createDirectory(at: old, withIntermediateDirectories: false)
+        // These fixtures model scanner-known generated roots. Tests that need
+        // ambiguous/model semantics create those candidates explicitly.
+        let active = root.appendingPathComponent("ActiveApp/Cache")
+        let old = root.appendingPathComponent("OldBuild/DerivedData")
+        try FileManager.default.createDirectory(at: active, withIntermediateDirectories: true)
+        try FileManager.default.createDirectory(at: old, withIntermediateDirectories: true)
         let list = CleanList(
             categories: [
                 .init(name: "AI Tools", items: [

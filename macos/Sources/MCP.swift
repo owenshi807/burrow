@@ -84,6 +84,16 @@ enum MCPToolError: Error {
 /// that returns a JSON string — agents read the text and parse it.
 struct ToolCatalog {
     let db: DB
+    private let cleanupPlans: CleanupPlanService
+    private let cleanupLedger: CleanupLedger
+
+    init(db: DB,
+         cleanupPlans: CleanupPlanService = CleanupPlanService(),
+         cleanupLedger: CleanupLedger = .shared) {
+        self.db = db
+        self.cleanupPlans = cleanupPlans
+        self.cleanupLedger = cleanupLedger
+    }
     /// The one query/aggregation layer — tool handlers parse arguments and
     /// format the frozen wire JSON; all DB/decode/ranking semantics live here.
     private var metrics: MetricsStore { MetricsStore(db: db) }
@@ -223,6 +233,18 @@ struct ToolCatalog {
                 ] as [String: Any],
             ],
             [
+                "name": "burrow_cleanup_runs",
+                "description": "Burrow's unified cleanup receipts. With no run_id, returns the newest runs with initiator, plan, mode, status, selected bytes and summary. With run_id, returns the complete per-candidate decision and outcome record, including skipped reasons and Trash destinations. Read-only.",
+                "inputSchema": [
+                    "type": "object",
+                    "properties": [
+                        "run_id": ["type": "string", "description": "Optional cleanup run UUID for full detail."],
+                        "limit": ["type": "integer", "minimum": 1, "maximum": 200],
+                    ],
+                    "additionalProperties": false,
+                ] as [String: Any],
+            ],
+            [
                 "name": "burrow_analyze",
                 "description": "Disk-usage breakdown of a directory via `mo analyze --json` — size-ranked immediate children (the data behind Burrow's treemap), largest first. Read-only (no deletion). Use to answer 'what's taking up space?'. `depth` > 1 also descends into the largest subdirectories, so one call replaces a per-directory drill-down. SLOW ON BIG TARGETS: a home folder or ~/Library can take minutes to scan — pass the most specific path you can and use `min_size` to skip noise. Truncation is always reported (`entries_omitted`/`omitted_bytes`; `partial: true` means the descent hit its time budget).",
                 "inputSchema": [
@@ -333,12 +355,36 @@ struct ToolCatalog {
             ],
             [
                 "name": "burrow_clean",
-                "description": "Clean caches, logs, temp files and leftovers via `mo clean`. SAFE BY DEFAULT: with no `confirm` (or confirm:false) it runs `--dry-run` and only PREVIEWS what would be freed — nothing is deleted. A real deletion needs confirm:true AND the user's opt-in ('Let agents run cleanups' in Burrow Settings); without the opt-in, confirm:true is refused and reported as blocked. Real runs are not elevated (user-level caches only). SLOW: the scan can take minutes on a full disk — a `timed_out: true` result means it was killed, not that there was nothing to clean.",
+                "description": "Legacy cache-clean preview. Without confirm:true it runs the engine dry-run and deletes nothing. Direct confirm:true execution is intentionally refused: use burrow_stage_cleanup_plan, inspect its typed candidates, then call burrow_execute_cleanup_plan with the exact plan/revision/candidate IDs. This prevents an Agent's approval from drifting from what Burrow scanned.",
                 "inputSchema": [
                     "type": "object",
                     "properties": [
-                        "confirm": ["type": "boolean", "description": "true = actually delete (requires the Settings opt-in). Omit/false = dry-run preview only."],
+                        "confirm": ["type": "boolean", "description": "Omit/false = legacy dry-run preview. true is refused; exact execution requires a staged plan."],
                     ],
+                    "additionalProperties": false,
+                ] as [String: Any],
+            ],
+            [
+                "name": "burrow_stage_cleanup_plan",
+                "description": "Scan cleanup candidates and create an immutable, revisioned Burrow plan. Returns candidate IDs plus deterministic meaning: recommended cleanup, review, or protected; owner hint; recoverability; regeneration cost; and evidence. Read-only: it never deletes. Plans expire when identities/content change, not after an arbitrary number of minutes.",
+                "inputSchema": [
+                    "type": "object",
+                    "properties": [String: Any](),
+                    "additionalProperties": false,
+                ] as [String: Any],
+            ],
+            [
+                "name": "burrow_execute_cleanup_plan",
+                "description": "Execute an exact staged cleanup plan. Requires plan_id, revision, unique candidate_ids, confirm:true, and the user's 'Let agents run cleanups' opt-in. Only candidates Burrow deterministically recommended are eligible over MCP. Every identity and subtree is revalidated at click time; changed items are skipped. v1 moves items to Trash and writes a complete Burrow cleanup receipt; it does not permanently delete them.",
+                "inputSchema": [
+                    "type": "object",
+                    "properties": [
+                        "plan_id": ["type": "string", "description": "UUID returned by burrow_stage_cleanup_plan."],
+                        "revision": ["type": "integer", "minimum": 1],
+                        "candidate_ids": ["type": "array", "items": ["type": "string"], "description": "Exact candidate IDs from the staged plan."],
+                        "confirm": ["type": "boolean", "description": "Must be true; the Settings opt-in is also required."],
+                    ],
+                    "required": ["plan_id", "revision", "candidate_ids", "confirm"],
                     "additionalProperties": false,
                 ] as [String: Any],
             ],
@@ -434,7 +480,8 @@ struct ToolCatalog {
     /// The mutating tools whose use we record. Read-only tools aren't audited
     /// — no action taken, and it would bloat the log (and the reader list).
     static let auditedTools: Set<String> = [
-        "burrow_clean", "burrow_optimize", "burrow_uninstall", "burrow_purge", "burrow_installer",
+        "burrow_clean", "burrow_execute_cleanup_plan", "burrow_optimize",
+        "burrow_uninstall", "burrow_purge", "burrow_installer",
     ]
 
     private func recordAudit(tool: String, arguments: [String: Any], ok: Bool, summary: String, since: Date) {
@@ -477,6 +524,8 @@ struct ToolCatalog {
             return self.callCleanupHistory(arguments)
         case "burrow_deleted_files":
             return self.callDeletedFiles(arguments)
+        case "burrow_cleanup_runs":
+            return try self.callCleanupRuns(arguments)
         case "burrow_analyze":
             return self.callAnalyze(arguments)
         case "burrow_list_apps":
@@ -496,7 +545,11 @@ struct ToolCatalog {
         case "burrow_slim_check":
             return try self.callSlimCheck(arguments)
         case "burrow_clean":
-            return self.runAction(.clean, confirm: (arguments["confirm"] as? Bool) ?? false)
+            return self.callLegacyClean(arguments)
+        case "burrow_stage_cleanup_plan":
+            return try self.callStageCleanupPlan()
+        case "burrow_execute_cleanup_plan":
+            return try self.callExecuteCleanupPlan(arguments)
         case "burrow_optimize":
             return self.runAction(.optimize, confirm: (arguments["confirm"] as? Bool) ?? false)
         case "burrow_uninstall":
@@ -919,6 +972,71 @@ struct ToolCatalog {
         let logPath = Self.deletionsLogPath()
         let text = (try? String(contentsOfFile: logPath, encoding: .utf8)) ?? ""
         return Self.deletedFilesResult(logText: text, logPath: logPath, limit: limit)
+    }
+
+    private func callCleanupRuns(_ args: [String: Any]) throws -> String {
+        if let rawID = args["run_id"] as? String {
+            guard let id = UUID(uuidString: rawID), let run = cleanupLedger.run(id: id) else {
+                throw MCPToolError.badArguments("Unknown cleanup run_id.")
+            }
+            return CleanupPlanWire.encode(CleanupRunDetailWire(run: run))
+        }
+        let limit = max(1, min((args["limit"] as? Int) ?? 20, 200))
+        return CleanupPlanWire.encode(CleanupRunsWire(
+            runs: cleanupLedger.recent(limit: limit)))
+    }
+
+    /// Compatibility preview only.  A bare confirm used to ask the engine to
+    /// choose a fresh set at execution time, which was not necessarily the set
+    /// an Agent had just described to the user.  Refuse that drift and point
+    /// callers at the capability-bound plan transaction.
+    private func callLegacyClean(_ args: [String: Any]) -> String {
+        guard (args["confirm"] as? Bool) != true else {
+            return Self.jsonString([
+                "blocked": true, "ran": false,
+                "reason": "Direct Agent cleanup is disabled. Call burrow_stage_cleanup_plan, inspect its candidate IDs, then call burrow_execute_cleanup_plan with that exact plan and revision.",
+            ])
+        }
+        return runAction(.clean, confirm: false)
+    }
+
+    private func callStageCleanupPlan() throws -> String {
+        let started = Date()
+        let preview = runAction(.clean, confirm: false)
+        guard let list = CleanList.loadLive() else {
+            throw MCPToolError.badArguments("The cleanup scanner did not produce an itemized candidate list.")
+        }
+        let values = try? CleanList.liveURL.resourceValues(forKeys: [.contentModificationDateKey])
+        guard let modified = values?.contentModificationDate,
+              modified >= started.addingTimeInterval(-2) else {
+            throw MCPToolError.badArguments(
+                "The cleanup preview file was not refreshed by this scan; Burrow refused to stage stale candidates. Scanner reply: \(preview.prefix(240))")
+        }
+        let plan = try cleanupPlans.stage(list: list, user: InvokingUserIdentity.current())
+        return CleanupPlanWire.encode(plan)
+    }
+
+    private func callExecuteCleanupPlan(_ args: [String: Any]) throws -> String {
+        guard (args["confirm"] as? Bool) == true else {
+            throw MCPToolError.badArguments("confirm:true is required to execute a staged cleanup plan.")
+        }
+        guard Store.mcpActionsEnabled else {
+            return Self.jsonString([
+                "blocked": true, "ran": false,
+                "reason": "Turn on ‘Let agents run cleanups’ in Burrow Settings, then retry the same plan and revision.",
+            ])
+        }
+        guard let rawID = args["plan_id"] as? String,
+              let planID = UUID(uuidString: rawID),
+              let revision = args["revision"] as? Int,
+              revision > 0,
+              let candidateIDs = args["candidate_ids"] as? [String] else {
+            throw MCPToolError.badArguments(
+                "plan_id, positive revision, and candidate_ids are required.")
+        }
+        let run = try cleanupPlans.execute(
+            planID: planID, revision: revision, candidateIDs: candidateIDs)
+        return CleanupPlanWire.encode(run)
     }
 
     /// Build the deleted-files reply from raw log text. Pure (the only impure
